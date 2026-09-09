@@ -1,0 +1,9 @@
+build/
+.gradle/
+.kotlin/
+dist/
+logs/
+*.log
+*.class
+.idea/
+.mcp.json

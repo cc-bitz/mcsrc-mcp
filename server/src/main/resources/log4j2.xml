@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Logging config for the game-code subprocesses this server spawns (datagen, the sidecar bridge),
+  passed via -Dlog4j.configurationFile, which outranks the log4j2.xml vanilla ships inside its
+  client jar. That config appends to logs/latest.log relative to the working directory, and MCP
+  clients start this server with the project dir as cwd - without this override a cold cache
+  scatters a stray logs/ dir into every project.
+  Console goes to stderr: the bridge speaks its protocol on stdout, and both children have stderr
+  drained for diagnostics (bridge stderr tail, datagen failure tail), so dropping the file
+  appender loses nothing. The pattern mirrors Minecraft's own line format, so a stderr tail reads
+  as expected.
+-->
+<Configuration status="FATAL">
+    <Appenders>
+        <Console name="Stderr" target="SYSTEM_ERR">
+            <PatternLayout pattern="[%d{HH:mm:ss}] [%t/%level]: %msg%n"/>
+        </Console>
+    </Appenders>
+    <Loggers>
+        <Root level="info">
+            <AppenderRef ref="Stderr"/>
+        </Root>
+    </Loggers>
+</Configuration>
