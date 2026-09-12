@@ -2,6 +2,9 @@ package io.github.ccbitz.mcsrcmcp.server
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
@@ -15,7 +18,12 @@ class SearchIndexBuilder(
      * Decompiles every class and writes it, plus every text asset, straight out to the on-disk
      * index. Entries used to be accumulated in two in-memory lists and handed back whole, which
      * meant the builder's peak was the entire decompiled codebase - and then that peak stayed
-     * resident as the returned index. Now nothing bigger than one class's source is ever held.
+     * resident as the returned index. Now nothing bigger than one batch of sources is ever held:
+     * classes decompile in batches sized to [DecompileService.parallelism] (the pool bounds real
+     * concurrency; the batch bounds how many decompiled sources sit in memory ahead of the
+     * single-threaded writer), and each finished batch is written and dropped before the next
+     * starts. Batch order follows the sorted class list, so the index is byte-identical to the
+     * sequential build this replaced.
      */
     suspend fun build(onProgress: (Int) -> Unit = {}): SearchIndex {
         val sourceCacheDir = cacheDir.resolve("source/$SOURCE_CACHE_CONFIG_VERSION")
@@ -29,21 +37,30 @@ class SearchIndexBuilder(
 
         val writer = SearchIndexStore.writer(cacheDir, workspace.versionId)
         return writer.use {
-            for ((index, internalName) in classNames.withIndex()) {
-                if (!coroutineContext.isActive) break
+            // A cancelled build falls out of the coroutineScope as CancellationException, so
+            // writer.use discards the temp files rather than finish() publishing a partial index
+            // - the check per batch just avoids starting work the cancellation already doomed.
+            coroutineScope {
+                val batches = classNames.chunked(DecompileService.parallelism)
+                for ((batchIndex, batch) in batches.withIndex()) {
+                    if (!coroutineContext.isActive) return@coroutineScope
 
-                val source = withContext(Dispatchers.IO) {
-                    DecompileService.decompileClass(
-                        workspace.remappedClasses,
-                        internalName,
-                        cacheDir = sourceCacheDir,
-                    )
+                    val sources = batch.map { internalName ->
+                        async(Dispatchers.IO) {
+                            DecompileService.decompileClass(
+                                workspace.remappedClasses,
+                                internalName,
+                                cacheDir = sourceCacheDir,
+                            )
+                        }
+                    }.awaitAll()
+
+                    for ((internalName, source) in batch.zip(sources)) {
+                        writer.add(SearchEntryKind.SOURCE, internalName.replace('/', '.'), source)
+                    }
+
+                    onProgress(((batchIndex + 1) * 100 / batches.size).coerceAtMost(100))
                 }
-
-                writer.add(SearchEntryKind.SOURCE, internalName.replace('/', '.'), source)
-
-                val percent = ((index + 1) * 100 / classNames.size).coerceAtMost(100)
-                onProgress(percent)
             }
 
             // One jar open for all of them rather than one per asset. batch's lambda isn't suspend,

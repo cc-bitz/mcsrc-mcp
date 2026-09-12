@@ -66,12 +66,14 @@ Version: every tool takes one - an id, or an alias (latest, latest-release, late
 exact/prefix id). If the user didn't say, infer from project files (build.gradle(.kts),
 fabric.mod.json, mods.toml, pom.xml); else "latest-release"; ask at most once, only if ambiguous.
 Any tool prepares a cold version itself, so the first call against one can take a while;
-prepare_version only front-loads that wait. Classes are dotted: net.minecraft.world.level.Level.
+prepare_version only front-loads that wait and returns as soon as the version is queryable.
+Classes are dotted: net.minecraft.world.level.Level.
 
 Searching: name search first - search_classes (code), search_asset_files (assets). Use full-text
 search_code/search_assets only when that fails or you lack a name (e.g. a constant or string
-literal); search_code is heavy - first call per version decompiles+indexes the jar and uses more
-tokens. When possible, scope it: feed find_references' callerClass values into search_code's
+literal); search_code is heavy - preparing a version starts decompiling+indexing the jar in the
+background, and the first search_code call waits out whatever of that remains (minutes on a fresh
+version) and uses more tokens. When possible, scope it: feed find_references' callerClass values into search_code's
 classes param. search_code is literal text/regex on decompiled source; find_references reads
 bytecode (CHECKCAST, INVOKE*, field refs), so it catches references that never spell the simple
 name - super(...), inherited/overridden methods, lambda/method-ref bodies. Empty search_code
@@ -567,8 +569,9 @@ private fun Server.registerTools(
         name = "prepare_version",
         description = "Warm up a version (download, remap, index) up front. Optional - every other " +
             "tool does this on first use - so call it only to front-load that wait. Blocks until " +
-            "ready (up to ${PREPARE_POLL_TIMEOUT.toMinutes()} minutes) rather than making you poll; " +
-            "if it times out, call again to keep waiting.",
+            "the version is queryable (up to ${PREPARE_POLL_TIMEOUT.toMinutes()} minutes) rather than " +
+            "making you poll; the full-text search index keeps building in the background and is " +
+            "waited on by the first search_code/search_assets call. If this times out, call again.",
         inputSchema = ToolSchema(
             properties = buildJsonObject { versionProp() },
             required = listOf("version"),
@@ -1429,10 +1432,16 @@ private fun Server.registerTools(
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
             is ResolvedWorkspace.Ok -> {
-                val index = versionPreparer.searchIndex(resolved.versionId)
+                // The workspace is Ready before its search index finishes building, so this is
+                // the one place the wait lands - with the same progress stream prepare uses.
+                val index = versionPreparer.awaitSearchIndex(resolved.workspace) { percent ->
+                    sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
+                }
                 if (index == null) {
-                    val percent = versionPreparer.indexProgress(resolved.versionId)
-                    CallToolResult(content = listOf(TextContent("Version ${resolved.versionId} has no full-text index (no on-disk cache is configured for this server, so one was never built).")), isError = true)
+                    CallToolResult(content = listOf(TextContent(
+                        "Version ${resolved.versionId} has no full-text index available (no on-disk cache is " +
+                            "configured, or its background build failed) - retry to rebuild it.",
+                    )), isError = true)
                 } else {
                     try {
                         val result = searchCodeToolLogic(index, query, useRegex, limit, classNames, exclude, exactCount)
@@ -1478,10 +1487,14 @@ private fun Server.registerTools(
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
             is ResolvedWorkspace.Ok -> {
-                val index = versionPreparer.searchIndex(resolved.versionId)
+                val index = versionPreparer.awaitSearchIndex(resolved.workspace) { percent ->
+                    sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
+                }
                 if (index == null) {
-                    val percent = versionPreparer.indexProgress(resolved.versionId)
-                    CallToolResult(content = listOf(TextContent("Version ${resolved.versionId} has no full-text index (no on-disk cache is configured for this server, so one was never built).")), isError = true)
+                    CallToolResult(content = listOf(TextContent(
+                        "Version ${resolved.versionId} has no full-text index available (no on-disk cache is " +
+                            "configured, or its background build failed) - retry to rebuild it.",
+                    )), isError = true)
                 } else {
                     try {
                         val result = searchAssetsToolLogic(index, query, useRegex, limit, assetPaths, exclude, exactCount)

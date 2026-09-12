@@ -87,6 +87,32 @@ class IndexerTest {
     }
 
     @Test
+    void addAllMergesShardedIndexersWithReferenceSetUnion() throws IOException {
+        // Two workers' shape: one indexed Animal, one indexed Dog, and both hold references
+        // pointing INTO the class the other one visited - reference keys are the referenced
+        // member, not the visited class, so they overlap where the visited classes don't.
+        Indexer animalWorker = new Indexer();
+        animalWorker.index(loadFixture("net/minecraft/Animal"));
+        Indexer dogWorker = new Indexer();
+        dogWorker.index(loadFixture("net/minecraft/Dog"));
+
+        animalWorker.addAll(dogWorker);
+        dogWorker.clear();
+
+        IndexData data = animalWorker.data();
+        assertNotNull(data.classes().get("net/minecraft/Animal"));
+        assertNotNull(data.classes().get("net/minecraft/Dog"));
+        assertNotNull(data.members().get("net/minecraft/Animal"));
+        assertNotNull(data.members().get("net/minecraft/Dog"));
+
+        java.util.Set<String> refs = animalWorker.references("net/minecraft/Animal:staticSound:()V");
+        assertTrue(refs.contains("m:net/minecraft/Dog:run:()V"));
+        // clear() after absorption is the caller's way to free the merged-away copy.
+        assertEquals(0, dogWorker.referenceCount());
+        assertTrue(dogWorker.data().classes().isEmpty());
+    }
+
+    @Test
     void loadReferencesClearsPreviousState() throws IOException {
         Indexer indexer = new Indexer();
         indexer.index(loadFixture("net/minecraft/Animal"));

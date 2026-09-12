@@ -165,11 +165,16 @@ private class TokenCollector(next: TextTokenVisitor) : TextTokenVisitor(next) {
 private const val TEXT_TOKEN_VISITOR_PROPERTY = "text_token_visitor"
 
 object DecompileService {
-    // A dedicated single-thread executor: serializes all decompile calls (Vineflower's
-    // thread-safety across concurrent Decompiler instances is not documented/verified, so
-    // don't assume it), and gives that thread a bumped stack size to reduce the odds of
-    // StackOverflowError on pathological deeply-nested Minecraft methods.
-    private val executor = Executors.newSingleThreadExecutor { runnable ->
+    // A small dedicated pool rather than the single thread this used to be: Vineflower's
+    // DecompilerContext is held in a ThreadLocal (decompiled straight from 1.12.0 - see
+    // DecompilerContext.currentContext), which is exactly how its own CLI runs decompiles
+    // concurrently, so concurrent Decompiler instances are safe as long as each stays on its own
+    // thread - which is all a fixed pool ever does with them. Every pool thread keeps the bumped
+    // stack size, to ride out pathological deeply-nested Minecraft methods. Width is capped
+    // because each in-flight decompile builds its own library context: unbounded width would
+    // trade a CPU win for a heap blowout under the server's 1.5GB ceiling.
+    internal val parallelism = Runtime.getRuntime().availableProcessors().coerceAtMost(4)
+    private val executor = Executors.newFixedThreadPool(parallelism) { runnable ->
         Thread(null, runnable, "vineflower-decompile", 64L * 1024 * 1024)
     }
 

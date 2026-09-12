@@ -57,6 +57,50 @@ class VersionWorkspaceBuilderTest {
             2:2:void woof() -> run
     """.trimIndent()
 
+    // Enough distinct classes to spread across the sharded passes' workers even on a big machine;
+    // seeded shuffle so the jar entry order never matches any natural sort.
+    private fun tinyClassBytes(internalName: String): ByteArray {
+        val writer = org.objectweb.asm.ClassWriter(0)
+        writer.visit(
+            org.objectweb.asm.Opcodes.V17,
+            org.objectweb.asm.Opcodes.ACC_PUBLIC,
+            internalName,
+            null,
+            "java/lang/Object",
+            null,
+        )
+        writer.visitEnd()
+        return writer.toByteArray()
+    }
+
+    @Test
+    fun `sharded build assembles remapped classes in jar entry order regardless of worker scheduling`(@TempDir tempDir: Path) = runTest {
+        val entryNames = (0 until 50).map { "gen/Tiny%02d".format(it) }.shuffled(java.util.Random(42))
+        val out = ByteArrayOutputStream()
+        ZipOutputStream(out).use { zip ->
+            for (name in entryNames) {
+                zip.putNextEntry(ZipEntry("$name.class"))
+                zip.write(tinyClassBytes(name))
+                zip.closeEntry()
+            }
+        }
+        val jarBytes = out.toByteArray()
+
+        val version = VersionListEntry("1.99-test", "release", "https://example.invalid/1.99-test.json",
+            "2024-01-01T00:00:00+00:00", "2024-01-01T00:00:00+00:00", sha1(jarBytes))
+        val detail = VersionDetail(
+            VersionDownloads(client = DownloadArtifact("https://example.invalid/client.jar", sha1(jarBytes), jarBytes.size.toLong()))
+        )
+        val fetcher = RecordingFetcher(mapOf("https://example.invalid/client.jar" to jarBytes))
+        val builder = VersionWorkspaceBuilder(BlobStore(tempDir), fetcher)
+
+        val workspace = builder.build(version, detail)
+
+        // Workers finish in any order; the assembled map and the jar it came from must not care.
+        assertEquals(entryNames, workspace.remappedClasses.keys.toList())
+        assertEquals(50, workspace.indexData.classes().size)
+    }
+
     private class RecordingFetcher(private val bytesByUrl: Map<String, ByteArray>) : BlobFetcher {
         var callCount = 0
             private set
@@ -237,7 +281,7 @@ class VersionWorkspaceBuilderTest {
         val firstWorkspace = VersionWorkspaceBuilder(blobStore, fetcher, cacheRoot).build(version, detail)
         val cacheDir = firstWorkspace.cacheDir!!
         assertTrue(Files.exists(cacheDir.resolve("remapped.jar")))
-        assertTrue(Files.exists(cacheDir.resolve("index.json")))
+        assertTrue(Files.exists(cacheDir.resolve("index.bin")))
 
         // A brand new builder instance, same blobStore/cacheRoot - proves the second build()
         // genuinely reloads from disk rather than relying on any in-memory state carried over

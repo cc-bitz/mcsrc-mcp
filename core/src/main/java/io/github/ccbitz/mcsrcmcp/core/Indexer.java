@@ -45,6 +45,20 @@ public final class Indexer {
         loadedReferences.forEach((key, value) -> references.put(key, new HashSet<>(value)));
     }
 
+    /**
+     * Merges {@code other} into this indexer. The parallel build shards classes across one Indexer
+     * per worker, so this is how the shards reunite. Class and member keys are the visited class
+     * itself, so those maps are disjoint across workers and a plain put is exact; reference keys
+     * are the REFERENCED class/member, which any number of workers can share, so those sets union.
+     * Callers may {@link #clear()} each absorbed indexer right after to free its copy while the
+     * rest are still merging.
+     */
+    public void addAll(Indexer other) {
+        classes.putAll(other.classes);
+        members.putAll(other.members);
+        other.references.forEach((key, value) -> references.computeIfAbsent(key, ignored -> new HashSet<>()).addAll(value));
+    }
+
     public int referenceCount() {
         return references.values().stream().mapToInt(Set::size).sum();
     }

@@ -13,7 +13,7 @@ class CacheEvictionTest {
     private fun makeDerivedDir(cacheRoot: Path, versionId: String, dirName: String, lastUsed: Instant): Path {
         val dir = cacheRoot.resolve("derived").resolve(versionId).resolve(dirName)
         Files.createDirectories(dir)
-        val indexFile = dir.resolve("index.json")
+        val indexFile = dir.resolve("index.bin")
         Files.writeString(indexFile, "{}")
         Files.setLastModifiedTime(indexFile, FileTime.from(lastUsed))
         val sourceFile = dir.resolve("source").resolve("v1").resolve("net.minecraft.Foo.java")
@@ -32,7 +32,7 @@ class CacheEvictionTest {
 
         assertFalse(Files.exists(stale))
         assertTrue(Files.exists(fresh))
-        assertTrue(Files.exists(fresh.resolve("index.json")))
+        assertTrue(Files.exists(fresh.resolve("index.bin")))
     }
 
     @Test

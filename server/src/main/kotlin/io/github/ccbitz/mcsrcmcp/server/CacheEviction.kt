@@ -22,11 +22,11 @@ fun resolveCacheMaxSizeBytes(env: Map<String, String> = System.getenv()): Long {
 }
 
 /**
- * Deletes derived-cache directories (a version's remapped.jar + index.json + source subtree as
+ * Deletes derived-cache directories (a version's remapped.jar + index.bin + source subtree as
  * one unit) that haven't been read in over [ttl], then if the remaining derived cache is still
- * over [maxSizeBytes] deletes the least-recently-used units (by index.json last-modified time)
+ * over [maxSizeBytes] deletes the least-recently-used units (by index.bin last-modified time)
  * until it fits. Versions in [warmVersions] are never evicted, even if they're old or large.
- * "Read" is tracked via index.json's last-modified time, which DerivedCacheStore.load()
+ * "Read" is tracked via index.bin's last-modified time, which DerivedCacheStore.load()
  * explicitly bumps to now on every cache hit.
  */
 object CacheEviction {
@@ -82,7 +82,7 @@ object CacheEviction {
                 Files.newDirectoryStream(versionDir).use { cacheDirs ->
                     for (cacheDir in cacheDirs) {
                         if (!Files.isDirectory(cacheDir)) continue
-                        val indexFile = cacheDir.resolve("index.json")
+                        val indexFile = cacheDir.resolve("index.bin")
                         if (!Files.exists(indexFile)) continue
                         val lastUsed = Files.getLastModifiedTime(indexFile).toInstant()
                         val size = directorySize(cacheDir)
@@ -138,7 +138,7 @@ object CacheEviction {
     )
 
     private fun evictIfStale(cacheDir: Path, cutoff: Instant) {
-        val indexFile = cacheDir.resolve("index.json")
+        val indexFile = cacheDir.resolve("index.bin")
         if (!Files.exists(indexFile)) {
             return
         }

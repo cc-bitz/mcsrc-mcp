@@ -73,11 +73,11 @@ class DerivedCacheStoreTest {
     }
 
     @Test
-    fun `load bumps index json's last-modified time, marking the cache as just-used`(@TempDir tempDir: Path) {
+    fun `load bumps the index file's last-modified time, marking the cache as just-used`(@TempDir tempDir: Path) {
         val derivedDir = DerivedCacheStore.directoryFor(tempDir, "1.21.4", "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111", null)
         DerivedCacheStore.save(derivedDir, mapOf("a" to byteArrayOf(1)), IndexData.empty(), emptyMap())
 
-        val indexFile = derivedDir.resolve("index.json")
+        val indexFile = derivedDir.resolve("index.bin")
         val oldTime = java.nio.file.attribute.FileTime.from(java.time.Instant.now().minus(java.time.Duration.ofDays(60)))
         java.nio.file.Files.setLastModifiedTime(indexFile, oldTime)
 
@@ -94,11 +94,13 @@ class DerivedCacheStoreTest {
     }
 
     @Test
-    fun `load returns null rather than throwing when index json is corrupt`(@TempDir tempDir: Path) {
+    fun `load returns null rather than throwing when the index file is corrupt`(@TempDir tempDir: Path) {
         val derivedDir = DerivedCacheStore.directoryFor(tempDir, "1.21.4", "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111", null)
         DerivedCacheStore.save(derivedDir, mapOf("a" to byteArrayOf(1)), IndexData.empty(), emptyMap())
 
-        java.nio.file.Files.writeString(derivedDir.resolve("index.json"), "{ not valid json")
+        // Valid writeUTF of a string that isn't the magic - fails the first read rather than
+        // deep in the counts, proving the corruption is caught either way.
+        java.nio.file.Files.writeString(derivedDir.resolve("index.bin"), "mangled")
 
         assertNull(DerivedCacheStore.load(derivedDir))
     }

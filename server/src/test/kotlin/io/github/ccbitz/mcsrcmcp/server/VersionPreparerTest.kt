@@ -5,9 +5,12 @@ import io.github.ccbitz.mcsrcmcp.cache.VersionDetail
 import io.github.ccbitz.mcsrcmcp.cache.VersionDownloads
 import io.github.ccbitz.mcsrcmcp.cache.VersionListEntry
 import io.github.ccbitz.mcsrcmcp.core.IndexData
+import io.github.ccbitz.mcsrcmcp.core.Indexer
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import java.nio.file.Files
 import java.time.Duration
 
 class VersionPreparerTest {
@@ -58,6 +61,50 @@ class VersionPreparerTest {
         println("second result: $second")
         assertTrue(second is PrepareVersionResult.Ready)
         assertEquals(1, builder.buildCount)
+    }
+
+    // The builder below returns a workspace with a real cacheDir and no classes, so the
+    // background index build is real (it publishes an empty-but-valid index) yet completes in
+    // one synchronous step on the test dispatcher - deterministic to observe mid-flight.
+    private class CacheDirBuilder(cacheDir: java.nio.file.Path) : VersionWorkspaceBuilder(
+        blobStore = io.github.ccbitz.mcsrcmcp.cache.BlobStore(Files.createTempDirectory("mcsrc-mcp-test")),
+        fetcher = object : BlobFetcher {
+            override suspend fun fetch(url: String): ByteArray = ByteArray(0)
+        },
+    ) {
+        private val workspace = VersionWorkspace(
+            "1.99-test", IndexData.empty(), null, emptyMap(), Indexer(), emptyMap(), EmptyAssetSource, cacheDir,
+        )
+
+        override suspend fun build(version: VersionListEntry, detail: VersionDetail): VersionWorkspace = workspace
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `prepare reports Ready as soon as the workspace is cached, with the index still building`() = runTest {
+        val cache = WorkspaceCache()
+        val preparer = VersionPreparer(cache, CacheDirBuilder(Files.createTempDirectory("mcsrc-index-test")), this)
+
+        val result = preparer.prepare(version, detail)
+
+        assertTrue(result is PrepareVersionResult.Ready, "Ready must not wait for the full-text index")
+        assertNull(preparer.searchIndex("1.99-test"), "the background index build has not run yet")
+
+        advanceUntilIdle()
+
+        assertNotNull(preparer.searchIndex("1.99-test"), "the background build should have published by now")
+    }
+
+    @Test
+    fun `awaitSearchIndex waits out an in-flight build and returns the published index`() = runTest {
+        val cache = WorkspaceCache()
+        val preparer = VersionPreparer(cache, CacheDirBuilder(Files.createTempDirectory("mcsrc-index-test")), this)
+        preparer.prepare(version, detail)
+
+        val index = preparer.awaitSearchIndex(cache.get("1.99-test")!!)
+
+        assertNotNull(index)
+        assertEquals("1.99-test", index!!.versionId)
     }
 
     @Test

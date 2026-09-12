@@ -6,9 +6,15 @@ import io.github.ccbitz.mcsrcmcp.cache.VersionListEntry
 import io.github.ccbitz.mcsrcmcp.core.ClassFileRemapper
 import io.github.ccbitz.mcsrcmcp.core.IndexData
 import io.github.ccbitz.mcsrcmcp.core.Indexer
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.objectweb.asm.ClassReader
 import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.ZipFile
+import kotlin.math.max
 
 /** Outcome of a conditional GET: either a body, or the server confirming what we hold is current. */
 sealed interface ConditionalFetch {
@@ -95,6 +101,12 @@ class VersionWorkspace(
 // older/legacy asset layouts even though current jars no longer use them.
 private val TEXT_ASSET_EXTENSIONS = setOf(".json", ".mcmeta", ".lang", ".txt", ".properties", ".vsh", ".fsh", ".glsl")
 
+// Width of the remap/index passes. Each worker's Indexer duplicates only the hash tables over the
+// same strings, but a ceiling well above the core count buys nothing - the passes are pure CPU -
+// and every extra copy of the reference tables is heap under the server's 1.5GB cap. Capped at the
+// class count by shardedPass itself, so small (test) jars run a single worker and stay sequential.
+private val REMAP_PARALLELISM = Runtime.getRuntime().availableProcessors().coerceAtMost(8)
+
 // open: VersionPreparerTest's CountingBuilder subclasses this to intercept build() without
 // re-implementing the fetch/cache/remap/asset-extraction wiring.
 open class VersionWorkspaceBuilder(
@@ -135,18 +147,22 @@ open class VersionWorkspaceBuilder(
         }
 
         val mappingsBytes = detail.downloads.clientMappings?.let { fetchBlobBytes(it.url, it.sha1) }
-        val (classEntries, assets) = ZipFile(clientJarPath.toFile()).use { zip ->
+        val (classList, assets) = ZipFile(clientJarPath.toFile()).use { zip ->
             readClasses(zip) to readAssets(zip)
         }
 
         // Pass 1: declarations-only index over the AS-DOWNLOADED bytes. ClassFileRemapper needs this
         // pre-remap (obfuscated) index to walk superclass chains when a member isn't declared on its
         // own obfuscated owner - so it runs only when there are mappings to build a remapper from.
+        // Both passes below shard classes across workers (see shardedPass); with mappings the jar is
+        // ~10k classes, and remap+index is pure CPU on independent inputs.
         val remapper = mappingsBytes?.let { mappings ->
-            val declarationIndexer = Indexer()
-            for (classBytes in classEntries.values) {
-                declarationIndexer.indexDeclarations(classBytes)
-            }
+            val declarationIndexer = mergeIndexers(
+                shardedPass(classList, REMAP_PARALLELISM) { indexer, classBytes ->
+                    indexer.indexDeclarations(classBytes)
+                    null
+                }.indexers
+            )
             ClassFileRemapper(mappings, declarationIndexer.data())
         }
 
@@ -154,19 +170,20 @@ open class VersionWorkspaceBuilder(
         // mapping, e.g. unobfuscated-by-default versions) - this is the index every tool that looks
         // up classes/members BY THEIR DEOBFUSCATED NAME actually queries, and also captures full
         // cross-references (find_references reads this via referenceIndexer).
-        val finalIndexer = Indexer()
-        val remappedClasses = LinkedHashMap<String, ByteArray>()
-        // Drops each raw class as its remapped copy is produced. Holding both whole sets at once
-        // doubled the peak heap of a cold build for no reason - nothing below reads the originals.
-        val rawClasses = classEntries.values.iterator()
-        while (rawClasses.hasNext()) {
-            val classBytes = rawClasses.next()
+        val pass2 = shardedPass(classList, REMAP_PARALLELISM) { indexer, classBytes ->
             val outputBytes = remapper?.remap(classBytes) ?: classBytes
-            finalIndexer.index(outputBytes)
-            // ClassReader.className reads just the constant pool header for the class's own
-            // (post-remap) internal name - cheap, no full visitor traversal needed.
-            remappedClasses[ClassReader(outputBytes).className] = outputBytes
-            rawClasses.remove()
+            indexer.index(outputBytes)
+            outputBytes
+        }
+        val finalIndexer = mergeIndexers(pass2.indexers)
+
+        // ClassReader.className reads just the constant pool header for the class's own
+        // (post-remap) internal name - cheap, no full visitor traversal needed. Assembling in
+        // claim order (jar entry order) keeps remapped.jar byte-identical across runs even
+        // though workers finish in any order.
+        val remappedClasses = LinkedHashMap<String, ByteArray>(classList.size)
+        for (outputBytes in pass2.outputs) {
+            if (outputBytes != null) remappedClasses[ClassReader(outputBytes).className] = outputBytes
         }
 
         val indexData = finalIndexer.data()
@@ -212,12 +229,67 @@ open class VersionWorkspaceBuilder(
         return assets
     }
 
-    private fun readClasses(zip: ZipFile): MutableMap<String, ByteArray> {
-        val classes = LinkedHashMap<String, ByteArray>()
+    // A list, not a map: nothing downstream needs the entry name (the post-remap internal name is
+    // re-read from each class), only the jar's entry order, which this preserves.
+    private fun readClasses(zip: ZipFile): List<ByteArray> {
+        val classes = ArrayList<ByteArray>()
         for (entry in zip.entries()) {
             if (entry.isDirectory || !entry.name.endsWith(".class")) continue
-            classes[entry.name] = zip.getInputStream(entry).use { it.readBytes() }
+            classes.add(zip.getInputStream(entry).use { it.readBytes() })
         }
         return classes
+    }
+
+    private class ShardedPass(val indexers: List<Indexer>, val outputs: Array<ByteArray?>)
+
+    /**
+     * Runs [visit] over every class on [parallelism] coroutines, one [Indexer] each - Indexer's
+     * plain HashMaps aren't thread-safe, and per-worker state makes the merge lock-free (see
+     * [Indexer.addAll]). A class is claimed by index from a shared cursor, so sharding is
+     * race-free without partitioning up front. When [visit] returns bytes, they land in
+     * [ShardedPass.outputs] at the claimed position and the raw copy is dropped immediately - the
+     * sequential loop this replaces freed each raw class as its remap was produced, and the peak
+     * heap of a cold build shouldn't regress just because the passes got wider.
+     */
+    private suspend fun shardedPass(
+        classList: List<ByteArray>,
+        parallelism: Int,
+        visit: (Indexer, ByteArray) -> ByteArray?,
+    ): ShardedPass = coroutineScope {
+        val rawClasses = ArrayList<ByteArray?>(classList.size).apply { addAll(classList) }
+        val outputs = arrayOfNulls<ByteArray>(rawClasses.size)
+        // Capped at the class count: a two-class test jar runs one worker, which is exactly the
+        // old sequential loop with no scheduling to speak of.
+        val width = parallelism.coerceIn(1, max(1, rawClasses.size))
+        val cursor = AtomicInteger()
+        val indexers = (0 until width).map {
+            async(Dispatchers.Default) {
+                val indexer = Indexer()
+                while (true) {
+                    val next = cursor.getAndIncrement()
+                    if (next >= rawClasses.size) break
+                    val classBytes = rawClasses[next] ?: continue
+                    val outputBytes = visit(indexer, classBytes)
+                    if (outputBytes != null) {
+                        outputs[next] = outputBytes
+                        rawClasses[next] = null
+                    }
+                }
+                indexer
+            }
+        }.awaitAll()
+        ShardedPass(indexers, outputs)
+    }
+
+    // The first worker's Indexer becomes the merged one (mutated in place) so the merge never
+    // holds a third copy of the reference graph; each absorbed worker is cleared right after so
+    // its share is collectable while the rest are still merging.
+    private fun mergeIndexers(indexers: List<Indexer>): Indexer {
+        val merged = indexers.first()
+        for (other in indexers.drop(1)) {
+            merged.addAll(other)
+            other.clear()
+        }
+        return merged
     }
 }
