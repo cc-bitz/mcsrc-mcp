@@ -76,7 +76,11 @@ fun listReportToolLogic(reportsDir: Path, prefix: String = "", limit: Int = 200)
         .take(limit)
         .map { child ->
             val relative = reportsDir.relativize(child.toAbsolutePath().normalize()).toString().replace('\\', '/')
-            FileTreeEntry(relative, Files.size(child).coerceAtMost(Int.MAX_VALUE.toLong()).toInt(), Files.isDirectory(child))
+            val isDirectory = Files.isDirectory(child)
+            // Files.size on a directory returns 0 on NTFS but the inode size (4096 on ext4) on Linux;
+            // it is filesystem noise either way, so directories report a constant 0.
+            val sizeBytes = if (isDirectory) 0 else Files.size(child).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            FileTreeEntry(relative, sizeBytes, isDirectory)
         }
     return FileTreeListing(prefix, entries, truncated = children.size > limit)
 }
