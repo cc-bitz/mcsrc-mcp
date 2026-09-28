@@ -82,6 +82,24 @@ class McpServerTest {
         assertNull(stringListArgRequest(null).stringListArg("classes"))
     }
 
+    private fun variantArgRequest(variant: String?): CallToolRequest =
+        CallToolRequest(
+            CallToolRequestParams(
+                name = "get_class_source",
+                arguments = variant?.let { buildJsonObject { put("variant", JsonPrimitive(it)) } },
+            ),
+        )
+
+    @Test
+    fun `variantArg reads the variant property`() {
+        assertEquals("paper/26.3.build.49-alpha", variantArgRequest("paper/26.3.build.49-alpha").variantArg())
+    }
+
+    @Test
+    fun `variantArg is null when the property is absent`() {
+        assertNull(variantArgRequest(null).variantArg())
+    }
+
     // A tool result carrying source/bytecode/asset text JSON-encoded whole -
     // TextContent(Json.encodeToString(result)) - buries real newlines as literal "\n" inside a
     // single JSON string value, which clients rendering raw output show as one long escaped

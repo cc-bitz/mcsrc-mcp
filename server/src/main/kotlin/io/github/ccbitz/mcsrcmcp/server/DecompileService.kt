@@ -14,6 +14,7 @@ import java.io.InputStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -184,8 +185,9 @@ object DecompileService {
         timeoutMs: Long = 30_000,
         cacheDir: Path? = null,
     ): DecompiledClass {
-        val cacheFile = cacheDir?.resolve("${sanitizeForCacheFilename(className)}.java")
-        val tokenFile = cacheDir?.resolve("${sanitizeForCacheFilename(className)}.tokens.json")
+        val cacheKey = sourceCacheKey(classes, className)
+        val cacheFile = cacheDir?.resolve("$cacheKey.java")
+        val tokenFile = cacheDir?.resolve("$cacheKey.tokens.json")
 
         // Both files or neither: decompileClass writes the source on its own, so finding a .java
         // says nothing about whether tokens were ever collected for it. Token offsets are only
@@ -213,7 +215,7 @@ object DecompileService {
         timeoutMs: Long = 30_000,
         cacheDir: Path? = null,
     ): String {
-        val cacheFile = cacheDir?.resolve("${sanitizeForCacheFilename(className)}.java")
+        val cacheFile = cacheDir?.resolve("${sourceCacheKey(classes, className)}.java")
         if (cacheFile != null && Files.exists(cacheFile)) {
             return Files.readString(cacheFile)
         }
@@ -225,6 +227,35 @@ object DecompileService {
         }
 
         return source
+    }
+
+    /**
+     * The cache key for one class's decompiled output: a hash over the exact bytes that feed the
+     * decompile - the outer class plus every inner class of it (Vineflower inlines inner classes
+     * into the outer's source, so an inner-class change must invalidate the entry too), names
+     * mixed in so a reordering can't collide. Content-keyed rather than name-keyed so a variant
+     * workspace can share its decompile cache across builds of the same Minecraft version: a new
+     * paper build re-decompiles only the classes its patches actually touched, which is what
+     * turns a full search-index rebuild from minutes into seconds.
+     */
+    internal fun sourceCacheKey(classes: Map<String, ByteArray>, className: String): String {
+        val outerClassName = className.substringBefore('$')
+        val targetPrefix = "$outerClassName$"
+        val names = classes.keys
+            .filter { it == outerClassName || it.startsWith(targetPrefix) }
+            .sorted()
+        if (outerClassName !in classes) {
+            // Key computation must not differ from runDecompile's class-not-found behavior: a
+            // missing class never reaches a cache path anyway, but the shared sweep in
+            // VersionPreparer calls this for classes that exist, so this is pure defense.
+            throw ClassNotFoundInIndexException(className)
+        }
+        val digest = MessageDigest.getInstance("SHA-1")
+        for (name in names) {
+            digest.update(name.toByteArray(Charsets.UTF_8))
+            digest.update(classes.getValue(name))
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     // Token collection is opt-in rather than always-on: get_class_source runs this on every read
@@ -287,17 +318,21 @@ object DecompileService {
         }
     }
 
-    // '/' is not a valid filename character - class internal names always contain it as a
-    // package separator, so this must run before writing the cache file. '$' (inner classes)
-    // is a valid filename character on Windows/macOS/Linux and needs no substitution.
-    private fun sanitizeForCacheFilename(className: String): String = className.replace('/', '.')
-
     private fun writeAtomic(target: Path, content: String) {
         Files.createDirectories(target.parent)
         val tmp = Files.createTempFile(target.parent, "src-", ".tmp")
         try {
             Files.writeString(tmp, content)
-            Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            try {
+                Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            } catch (e: java.nio.file.AccessDeniedException) {
+                // The content-keyed shared cache can have two writers (or a writer and a reader)
+                // on one key at once - two builds of a fork indexing the same unchanged class.
+                // Windows denies replacing a file another handle has open. The key is a hash of
+                // the decompiler's whole input, so whatever is already there is this exact
+                // content: done. Only an absent target is a real failure.
+                if (!Files.exists(target)) throw e
+            }
         } finally {
             Files.deleteIfExists(tmp)
         }

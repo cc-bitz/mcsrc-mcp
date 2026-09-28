@@ -100,12 +100,12 @@ fun diffClassToolLogic(
     val sourceA = DecompileService.decompileClass(
         workspaceA.remappedClasses,
         internalName,
-        cacheDir = workspaceA.cacheDir?.resolve("source/$SOURCE_CACHE_CONFIG_VERSION"),
+        cacheDir = workspaceA.sourceCacheDir,
     )
     val sourceB = DecompileService.decompileClass(
         workspaceB.remappedClasses,
         internalName,
-        cacheDir = workspaceB.cacheDir?.resolve("source/$SOURCE_CACHE_CONFIG_VERSION"),
+        cacheDir = workspaceB.sourceCacheDir,
     )
 
     val diff = unifiedDiff(

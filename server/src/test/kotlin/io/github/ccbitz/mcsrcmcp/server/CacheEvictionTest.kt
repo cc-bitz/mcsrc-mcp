@@ -62,6 +62,35 @@ class CacheEvictionTest {
         }
     }
 
+    // A fork's shared source cache and latest marker belong to no derived unit; they go once no
+    // build of their Minecraft version is left, and stay while one is.
+    @Test
+    fun `orphaned fork source caches and latest markers are dropped, live ones kept`(@TempDir cacheRoot: Path) {
+        val derived = cacheRoot.resolve("derived").resolve("paper")
+
+        val liveHashDir = derived.resolve("26.3.build.49").resolve("v2-serverhash-papercliphash")
+        Files.createDirectories(liveHashDir)
+        Files.writeString(liveHashDir.resolve("index.bin"), "{}")
+
+        val liveSourceCache = derived.resolve("26.3").resolve("source-cache").resolve(SOURCE_CACHE_CONFIG_VERSION)
+        Files.createDirectories(liveSourceCache)
+        Files.writeString(liveSourceCache.resolve("a".repeat(40) + ".java"), "kept")
+        Files.writeString(derived.resolve("26.3.latest"), "paper/26.3.build.49")
+
+        val orphanSourceCache = derived.resolve("26.2").resolve("source-cache").resolve(SOURCE_CACHE_CONFIG_VERSION)
+        Files.createDirectories(orphanSourceCache)
+        Files.writeString(orphanSourceCache.resolve("b".repeat(40) + ".java"), "orphan")
+        Files.writeString(derived.resolve("26.2.latest"), "paper/26.2.build.12")
+
+        CacheEviction.evictStale(cacheRoot, Duration.ofDays(30))
+
+        assertTrue(Files.exists(liveHashDir.resolve("index.bin")))
+        assertTrue(Files.exists(liveSourceCache.resolve("a".repeat(40) + ".java")))
+        assertTrue(Files.exists(derived.resolve("26.3.latest")))
+        assertFalse(Files.exists(orphanSourceCache))
+        assertFalse(Files.exists(derived.resolve("26.2.latest")))
+    }
+
     @Test
     fun `resolveCacheTtl defaults to 30 days and honors the env override`() {
         assertEquals(Duration.ofDays(30), resolveCacheTtl(emptyMap()))
@@ -145,6 +174,19 @@ class CacheEvictionTest {
         assertFalse(Files.exists(target))
         assertFalse(Files.exists(cacheRoot.resolve("derived").resolve("1.21.4")))
         assertTrue(Files.exists(other))
+    }
+
+    // clear_cache on a fork drops its shared decompile cache this way - by then the directory is
+    // full of entries, so a plain delete would throw DirectoryNotEmptyException.
+    @Test
+    fun `evictVersion removes a fork's populated shared source cache`(@TempDir cacheRoot: Path) {
+        val sourceCache = sharedSourceCacheDir(cacheRoot, Variants.PAPER, "26.3")
+        Files.createDirectories(sourceCache)
+        Files.writeString(sourceCache.resolve("a".repeat(40) + ".java"), "class Foo {}")
+
+        CacheEviction.evictVersion(cacheRoot, "${Variants.PAPER}/26.3")
+
+        assertFalse(Files.exists(cacheRoot.resolve("derived").resolve(Variants.PAPER).resolve("26.3")))
     }
 
     @Test

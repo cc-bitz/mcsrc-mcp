@@ -58,7 +58,7 @@ class DecompileServiceTest {
     fun `writes decompiled source to the cache directory when one is provided`(@org.junit.jupiter.api.io.TempDir tempDir: Path) {
         val source = DecompileService.decompileClass(itemAndBlockItem, "net/minecraft/Item", cacheDir = tempDir)
 
-        val cacheFile = tempDir.resolve("net.minecraft.Item.java")
+        val cacheFile = tempDir.resolve(DecompileService.sourceCacheKey(itemAndBlockItem, "net/minecraft/Item") + ".java")
         assertTrue(Files.exists(cacheFile), "expected a cache file to be written")
         assertEquals(source, Files.readString(cacheFile))
     }
@@ -70,7 +70,7 @@ class DecompileServiceTest {
         // Overwrite the cache file with a sentinel that could never be real Vineflower output -
         // if the second call actually re-decompiled instead of reading the cache, we'd get real
         // Java source back, not this sentinel.
-        val cacheFile = tempDir.resolve("net.minecraft.Item.java")
+        val cacheFile = tempDir.resolve(DecompileService.sourceCacheKey(itemAndBlockItem, "net/minecraft/Item") + ".java")
         Files.writeString(cacheFile, "SENTINEL_CACHED_CONTENT")
 
         val result = DecompileService.decompileClass(itemAndBlockItem, "net/minecraft/Item", cacheDir = tempDir)
@@ -103,11 +103,11 @@ class DecompileServiceTest {
     fun `caches tokens beside the source and serves both from the cache on the next call`(@org.junit.jupiter.api.io.TempDir tempDir: Path) {
         DecompileService.decompileWithTokens(itemAndBlockItem, "net/minecraft/Item", cacheDir = tempDir)
 
-        assertTrue(Files.exists(tempDir.resolve("net.minecraft.Item.tokens.json")), "expected a token cache file beside the source")
+        assertTrue(Files.exists(tempDir.resolve(DecompileService.sourceCacheKey(itemAndBlockItem, "net/minecraft/Item") + ".tokens.json")), "expected a token cache file beside the source")
 
         // Same sentinel trick as the source-only cache test: real Vineflower output could never
         // be this, so getting it back proves the second call never re-decompiled.
-        Files.writeString(tempDir.resolve("net.minecraft.Item.java"), "SENTINEL_CACHED_CONTENT")
+        Files.writeString(tempDir.resolve(DecompileService.sourceCacheKey(itemAndBlockItem, "net/minecraft/Item") + ".java"), "SENTINEL_CACHED_CONTENT")
         val result = DecompileService.decompileWithTokens(itemAndBlockItem, "net/minecraft/Item", cacheDir = tempDir)
 
         assertEquals("SENTINEL_CACHED_CONTENT", result.source)

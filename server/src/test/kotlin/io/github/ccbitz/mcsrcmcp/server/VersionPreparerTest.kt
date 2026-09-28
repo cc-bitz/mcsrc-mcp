@@ -20,26 +20,24 @@ class VersionPreparerTest {
         client = DownloadArtifact("https://example.invalid/client.jar", "0".repeat(40), 1),
     ))
 
-    private class CountingBuilder : VersionWorkspaceBuilder(
-        blobStore = io.github.ccbitz.mcsrcmcp.cache.BlobStore(java.nio.file.Files.createTempDirectory("mcsrc-mcp-test")),
-        fetcher = object : BlobFetcher {
-            override suspend fun fetch(url: String): ByteArray = ByteArray(0)
-        },
-    ) {
+    private class CountingBuilder : VersionWorkspaceBuilder {
+        override val variant: String = Variants.VANILLA
         var buildCount = 0
             private set
 
-        override suspend fun build(version: VersionListEntry, detail: VersionDetail): VersionWorkspace {
+        override suspend fun build(request: WorkspaceRequest, version: VersionListEntry, detail: VersionDetail): VersionWorkspace {
             buildCount++
             return VersionWorkspace(version.id, IndexData.empty(), null, emptyMap(), io.github.ccbitz.mcsrcmcp.core.Indexer(), emptyMap(), EmptyAssetSource, null)
         }
     }
 
+    private fun buildersOf(vararg builders: VersionWorkspaceBuilder) = VariantBuilders(builders.toList())
+
     @Test
     fun `first prepare builds and caches the workspace`() = runTest {
         val cache = WorkspaceCache()
         val builder = CountingBuilder()
-        val preparer = VersionPreparer(cache, builder, this)
+        val preparer = VersionPreparer(cache, buildersOf(builder), this)
 
         val result = preparer.prepare(version, detail)
 
@@ -52,7 +50,7 @@ class VersionPreparerTest {
     fun `second prepare for an already-warm version does not rebuild`() = runTest {
         val cache = WorkspaceCache()
         val builder = CountingBuilder()
-        val preparer = VersionPreparer(cache, builder, this)
+        val preparer = VersionPreparer(cache, buildersOf(builder), this)
 
         val first = preparer.prepare(version, detail)
         println("first result: $first, cacheDir=${cache.get("1.99-test")?.cacheDir}")
@@ -66,24 +64,21 @@ class VersionPreparerTest {
     // The builder below returns a workspace with a real cacheDir and no classes, so the
     // background index build is real (it publishes an empty-but-valid index) yet completes in
     // one synchronous step on the test dispatcher - deterministic to observe mid-flight.
-    private class CacheDirBuilder(cacheDir: java.nio.file.Path) : VersionWorkspaceBuilder(
-        blobStore = io.github.ccbitz.mcsrcmcp.cache.BlobStore(Files.createTempDirectory("mcsrc-mcp-test")),
-        fetcher = object : BlobFetcher {
-            override suspend fun fetch(url: String): ByteArray = ByteArray(0)
-        },
-    ) {
+    private class CacheDirBuilder(cacheDir: java.nio.file.Path) : VersionWorkspaceBuilder {
+        override val variant: String = Variants.VANILLA
+
         private val workspace = VersionWorkspace(
             "1.99-test", IndexData.empty(), null, emptyMap(), Indexer(), emptyMap(), EmptyAssetSource, cacheDir,
         )
 
-        override suspend fun build(version: VersionListEntry, detail: VersionDetail): VersionWorkspace = workspace
+        override suspend fun build(request: WorkspaceRequest, version: VersionListEntry, detail: VersionDetail): VersionWorkspace = workspace
     }
 
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
     fun `prepare reports Ready as soon as the workspace is cached, with the index still building`() = runTest {
         val cache = WorkspaceCache()
-        val preparer = VersionPreparer(cache, CacheDirBuilder(Files.createTempDirectory("mcsrc-index-test")), this)
+        val preparer = VersionPreparer(cache, buildersOf(CacheDirBuilder(Files.createTempDirectory("mcsrc-index-test"))), this)
 
         val result = preparer.prepare(version, detail)
 
@@ -98,7 +93,7 @@ class VersionPreparerTest {
     @Test
     fun `awaitSearchIndex waits out an in-flight build and returns the published index`() = runTest {
         val cache = WorkspaceCache()
-        val preparer = VersionPreparer(cache, CacheDirBuilder(Files.createTempDirectory("mcsrc-index-test")), this)
+        val preparer = VersionPreparer(cache, buildersOf(CacheDirBuilder(Files.createTempDirectory("mcsrc-index-test"))), this)
         preparer.prepare(version, detail)
 
         val index = preparer.awaitSearchIndex(cache.get("1.99-test")!!)
@@ -145,7 +140,7 @@ class VersionPreparerTest {
     fun `clear drops a warm version so the next prepare rebuilds it`() = runTest {
         val cache = WorkspaceCache()
         val builder = CountingBuilder()
-        val preparer = VersionPreparer(cache, builder, this)
+        val preparer = VersionPreparer(cache, buildersOf(builder), this)
         preparer.prepare(version, detail)
         assertEquals(1, builder.buildCount)
 
@@ -160,7 +155,7 @@ class VersionPreparerTest {
     @Test
     fun `clear of a version never prepared does nothing`() = runTest {
         val cache = WorkspaceCache()
-        val preparer = VersionPreparer(cache, CountingBuilder(), this)
+        val preparer = VersionPreparer(cache, buildersOf(CountingBuilder()), this)
 
         assertDoesNotThrow { preparer.clear("never-prepared") }
     }
@@ -169,7 +164,7 @@ class VersionPreparerTest {
     fun `clearAll drops every warm version`() = runTest {
         val cache = WorkspaceCache()
         val builder = CountingBuilder()
-        val preparer = VersionPreparer(cache, builder, this)
+        val preparer = VersionPreparer(cache, buildersOf(builder), this)
         val otherVersion = version.copy(id = "1.98-test")
         preparer.prepare(version, detail)
         preparer.prepare(otherVersion, detail)

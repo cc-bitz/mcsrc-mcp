@@ -47,7 +47,7 @@ class GetClassSourceToolTest {
 
     @Test
     fun `forwards sourceCacheDir to DecompileService`(@org.junit.jupiter.api.io.TempDir tempDir: Path) {
-        Files.writeString(tempDir.resolve("net.minecraft.Item.java"), "SENTINEL_CACHED_CONTENT")
+        Files.writeString(tempDir.resolve(DecompileService.sourceCacheKey(classes, "net/minecraft/Item") + ".java"), "SENTINEL_CACHED_CONTENT")
 
         val result = getClassSourceToolLogic(classes, "net.minecraft.Item", sourceCacheDir = tempDir)
 

@@ -7,6 +7,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 
@@ -56,13 +59,18 @@ suspend fun pollUntilReady(
 
 class VersionPreparer(
     private val cache: WorkspaceCache,
-    private val builder: VersionWorkspaceBuilder,
+    private val builders: VariantBuilders,
     private val scope: CoroutineScope,
+    // Null keeps latest-build tracking off - a test, or a server with no cache root.
+    private val cacheRoot: Path? = null,
 ) {
     private val inFlight = ConcurrentHashMap<String, Boolean>()
     private val indexJobs = ConcurrentHashMap<String, Job>()
     private val indexProgress = ConcurrentHashMap<String, Int>()
     private val indexes = ConcurrentHashMap<String, SearchIndex>()
+
+    suspend fun prepare(version: VersionListEntry, detail: VersionDetail): PrepareVersionResult =
+        prepare(WorkspaceRequest(Variants.VANILLA, null, version.id), version, detail)
 
     /**
      * Ready means the workspace itself is queryable - every tool except full-text search works
@@ -71,24 +79,29 @@ class VersionPreparer(
      * whole jar was decompiled, which made "prepare" a several-minute wait that almost no tool
      * needed - only search_code/search_assets ever read the index.
      */
-    suspend fun prepare(version: VersionListEntry, detail: VersionDetail): PrepareVersionResult {
-        val cachedWorkspace = cache.get(version.id)
+    suspend fun prepare(request: WorkspaceRequest, version: VersionListEntry, detail: VersionDetail): PrepareVersionResult {
+        val cachedWorkspace = cache.get(request.workspaceId)
         if (cachedWorkspace != null) {
             ensureIndexStarted(cachedWorkspace)
-            return PrepareVersionResult.Ready(version.id)
+            return PrepareVersionResult.Ready(request.workspaceId)
         }
 
-        if (inFlight.putIfAbsent(version.id, true) != null) {
-            return PrepareVersionResult.Preparing(version.id, 0)
+        if (inFlight.putIfAbsent(request.workspaceId, true) != null) {
+            return PrepareVersionResult.Preparing(request.workspaceId, 0)
         }
 
         try {
-            val workspace = builder.build(version, detail)
-            cache.put(version.id, workspace)
+            val builder = builders.forVariant(request.variant)
+                ?: throw UnknownVariantException(request.variant, builders.ids())
+            val workspace = builder.build(request, version, detail)
+            cache.put(request.workspaceId, workspace)
             ensureIndexStarted(workspace)
-            return PrepareVersionResult.Ready(version.id)
+            if (request.build == null && request.variant != Variants.VANILLA) {
+                rotateLatest(request, version.id, workspace)
+            }
+            return PrepareVersionResult.Ready(request.workspaceId)
         } finally {
-            inFlight.remove(version.id)
+            inFlight.remove(request.workspaceId)
         }
     }
 
@@ -123,25 +136,98 @@ class VersionPreparer(
     }
 
     /**
-     * Drops all in-memory state for [versionId]: the cached workspace, its search index,
+     * Drops all in-memory state for [workspaceId]: the cached workspace, its search index,
      * indexing progress, and the in-flight-build marker. Any index-build job still running for
      * it is cancelled rather than left to finish and repopulate state we just cleared. Used by
      * the clear_cache tool, alongside deleting the on-disk derived cache, so a cleared version
      * genuinely starts over on next use instead of still answering from memory.
      */
-    fun clear(versionId: String) {
-        cache.remove(versionId)
-        indexJobs.remove(versionId)?.cancel()
-        indexProgress.remove(versionId)
-        indexes.remove(versionId)
-        inFlight.remove(versionId)
+    fun clear(workspaceId: String) {
+        cache.remove(workspaceId)
+        indexJobs.remove(workspaceId)?.cancel()
+        indexProgress.remove(workspaceId)
+        indexes.remove(workspaceId)
+        inFlight.remove(workspaceId)
     }
 
-    /** [clear] for every version this preparer has touched. */
+    /** [clear] for every workspace this preparer has touched. */
     fun clearAll() {
-        val versionIds = cache.warmVersions() + indexJobs.keys + indexProgress.keys + indexes.keys + inFlight.keys
-        for (versionId in versionIds.toSet()) {
-            clear(versionId)
+        val workspaceIds = cache.warmVersions() + indexJobs.keys + indexProgress.keys + indexes.keys + inFlight.keys
+        for (workspaceId in workspaceIds.toSet()) {
+            clear(workspaceId)
+        }
+    }
+
+    /**
+     * Variant builds resolved without an explicit pin are "latest" builds, and every active fork
+     * republishes them often. Left alone, every build the user ever touched would leave a full
+     * derived directory on disk - hundreds of near-identical indexes over time. So a successful
+     * latest-build prepare records its workspace id in a marker file, and the next latest-build
+     * prepare of the same Minecraft version evicts the previous one's derived cache and in-memory
+     * state. Pinned builds (an explicit id/build argument) never write the marker and never get
+     * rotated out: the caller asked for that exact build.
+     *
+     * The shared, content-keyed decompile cache ([sharedSourceCacheDir]) is deliberately kept: it
+     * is what makes the next build cheap. This sweeps it down to the keys that the new build, or
+     * any other warm build sharing the directory, can still hit, so entries orphaned by older builds
+     * don't accumulate either. A pinned build that has gone cold loses its entries in the sweep and
+     * re-decompiles on demand - a cost, never a wrong answer, since entries are content-keyed.
+     *
+     * Housekeeping only: by the time this runs the workspace is built and cached, so a filesystem
+     * error here (Windows refusing to delete a file a reader holds open, say) is logged rather
+     * than turned into a failed prepare.
+     */
+    private fun rotateLatest(request: WorkspaceRequest, mcVersion: String, workspace: VersionWorkspace) {
+        val root = cacheRoot ?: return
+        try {
+            val variantDir = root.resolve("derived").resolve(request.variant)
+            val marker = variantDir.resolve("$mcVersion.latest")
+            val previous = runCatching { Files.readString(marker) }.getOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+
+            if (previous != null && previous != request.workspaceId) {
+                clear(previous)
+                CacheEviction.evictVersion(root, previous)
+            }
+
+            workspace.sourceCacheDir?.let { sweepSharedSourceCache(it, workspace) }
+
+            Files.createDirectories(variantDir)
+            val tmp = Files.createTempFile(variantDir, "latest-", ".tmp")
+            try {
+                Files.writeString(tmp, request.workspaceId)
+                Files.move(tmp, marker, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            } finally {
+                Files.deleteIfExists(tmp)
+            }
+        } catch (e: Exception) {
+            System.err.println("mcsrc-mcp: latest-build cleanup for ${request.workspaceId} failed: $e")
+        }
+    }
+
+    private fun sweepSharedSourceCache(sourceCacheDir: Path, workspace: VersionWorkspace) {
+        if (!Files.isDirectory(sourceCacheDir)) return
+
+        // Only outer classes get their own entries - inner classes are decompiled into them.
+        fun keysOf(ws: VersionWorkspace): Sequence<String> =
+            ws.remappedClasses.keys.asSequence()
+                .filter { '$' !in it }
+                .mapNotNull { runCatching { DecompileService.sourceCacheKey(ws.remappedClasses, it) }.getOrNull() }
+
+        val sharing = cache.warmVersions().mapNotNull { cache.get(it) }
+            .filter { it !== workspace && it.sourceCacheDir == sourceCacheDir }
+        val keep = (sequenceOf(workspace) + sharing).flatMap { keysOf(it) }.toHashSet()
+
+        Files.newDirectoryStream(sourceCacheDir).use { entries ->
+            for (entry in entries) {
+                val name = entry.fileName.toString()
+                val stem = when {
+                    name.endsWith(".tokens.json") -> name.removeSuffix(".tokens.json")
+                    name.endsWith(".java") -> name.removeSuffix(".java")
+                    // Anything else is not an entry - an in-flight write's temp file above all.
+                    else -> continue
+                }
+                if (stem !in keep) Files.deleteIfExists(entry)
+            }
         }
     }
 

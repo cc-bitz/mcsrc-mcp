@@ -92,9 +92,9 @@ class VersionWorkspaceBuilderTest {
             VersionDownloads(client = DownloadArtifact("https://example.invalid/client.jar", sha1(jarBytes), jarBytes.size.toLong()))
         )
         val fetcher = RecordingFetcher(mapOf("https://example.invalid/client.jar" to jarBytes))
-        val builder = VersionWorkspaceBuilder(BlobStore(tempDir), fetcher)
+        val builder = VanillaWorkspaceBuilder(BlobStore(tempDir), fetcher)
 
-        val workspace = builder.build(version, detail)
+        val workspace = builder.build(WorkspaceRequest(Variants.VANILLA, null, version.id), version, detail)
 
         // Workers finish in any order; the assembled map and the jar it came from must not care.
         assertEquals(entryNames, workspace.remappedClasses.keys.toList())
@@ -130,9 +130,9 @@ class VersionWorkspaceBuilderTest {
             "https://example.invalid/client.txt" to mappingBytes,
         ))
         val blobStore = BlobStore(tempDir)
-        val builder = VersionWorkspaceBuilder(blobStore, fetcher)
+        val builder = VanillaWorkspaceBuilder(blobStore, fetcher)
 
-        val workspace = builder.build(version, detail)
+        val workspace = builder.build(WorkspaceRequest(Variants.VANILLA, null, version.id), version, detail)
 
         assertEquals("1.99-test", workspace.versionId)
         // The workspace's index is keyed by the DEOBFUSCATED (remapped) name, not the
@@ -178,9 +178,9 @@ class VersionWorkspaceBuilderTest {
         )
 
         val fetcher = RecordingFetcher(emptyMap()) // any call fails the test via error()
-        val builder = VersionWorkspaceBuilder(blobStore, fetcher)
+        val builder = VanillaWorkspaceBuilder(blobStore, fetcher)
 
-        val workspace = builder.build(version, detail)
+        val workspace = builder.build(WorkspaceRequest(Variants.VANILLA, null, version.id), version, detail)
 
         assertEquals(0, fetcher.callCount)
         assertNotNull(workspace.remapper)
@@ -204,9 +204,9 @@ class VersionWorkspaceBuilderTest {
             "https://example.invalid/client.txt" to mappingBytes,
         ))
         val blobStore = BlobStore(tempDir)
-        val builder = VersionWorkspaceBuilder(blobStore, fetcher)
+        val builder = VanillaWorkspaceBuilder(blobStore, fetcher)
 
-        val workspace = builder.build(version, detail)
+        val workspace = builder.build(WorkspaceRequest(Variants.VANILLA, null, version.id), version, detail)
 
         // Dog#run() (remapped to Hound#woof()) calls the static Animal#staticSound()
         // (remapped to Beast#makeNoise()). Pass 2 indexes the REMAPPED bytecode, so both the
@@ -233,9 +233,9 @@ class VersionWorkspaceBuilderTest {
             "https://example.invalid/client.txt" to mappingBytes,
         ))
         val blobStore = BlobStore(tempDir)
-        val builder = VersionWorkspaceBuilder(blobStore, fetcher)
+        val builder = VanillaWorkspaceBuilder(blobStore, fetcher)
 
-        val workspace = builder.build(version, detail)
+        val workspace = builder.build(WorkspaceRequest(Variants.VANILLA, null, version.id), version, detail)
 
         val langAsset = workspace.assets["assets/minecraft/lang/en_us.json"]
         assertNotNull(langAsset)
@@ -278,7 +278,7 @@ class VersionWorkspaceBuilderTest {
         ))
         val blobStore = BlobStore(blobsDir)
 
-        val firstWorkspace = VersionWorkspaceBuilder(blobStore, fetcher, cacheRoot).build(version, detail)
+        val firstWorkspace = VanillaWorkspaceBuilder(blobStore, fetcher, cacheRoot).build(WorkspaceRequest(Variants.VANILLA, null, version.id), version, detail)
         val cacheDir = firstWorkspace.cacheDir!!
         assertTrue(Files.exists(cacheDir.resolve("remapped.jar")))
         assertTrue(Files.exists(cacheDir.resolve("index.bin")))
@@ -286,7 +286,7 @@ class VersionWorkspaceBuilderTest {
         // A brand new builder instance, same blobStore/cacheRoot - proves the second build()
         // genuinely reloads from disk rather than relying on any in-memory state carried over
         // from the first builder.
-        val secondWorkspace = VersionWorkspaceBuilder(blobStore, fetcher, cacheRoot).build(version, detail)
+        val secondWorkspace = VanillaWorkspaceBuilder(blobStore, fetcher, cacheRoot).build(WorkspaceRequest(Variants.VANILLA, null, version.id), version, detail)
 
         assertNull(secondWorkspace.indexData.classes()["net/minecraft/Dog"])
         assertNotNull(secondWorkspace.indexData.classes()["net/minecraft/wolf/Hound"])
@@ -317,7 +317,7 @@ class VersionWorkspaceBuilderTest {
         ))
         val blobStore = BlobStore(tempDir)
 
-        val workspace = VersionWorkspaceBuilder(blobStore, fetcher).build(version, detail) // 2-arg, no cacheRoot
+        val workspace = VanillaWorkspaceBuilder(blobStore, fetcher).build(WorkspaceRequest(Variants.VANILLA, null, version.id), version, detail) // 2-arg, no cacheRoot
 
         assertNull(workspace.cacheDir)
     }

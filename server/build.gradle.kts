@@ -18,6 +18,10 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-io-core:0.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.vineflower:vineflower:1.12.0")
+    // Paper variant: paperclip's binary patches are bsdiff; jbsdiff is the exact library
+    // paperclip itself applies them with, commons-compress is its bzip2 backend.
+    implementation("io.sigpipe:jbsdiff:1.0")
+    implementation("org.apache.commons:commons-compress:1.27.1")
 
     testImplementation(platform("org.junit:junit-bom:5.11.0"))
     testImplementation("org.junit.jupiter:junit-jupiter")

@@ -83,12 +83,12 @@ class ResolveWorkspaceTest {
         ))
         val eulaGate = EulaGate(tempDir.resolve("eula.txt"), env = mapOf("MCSRC_MCP_ACCEPT_EULA" to "1"))
         val workspaceCache = WorkspaceCache()
-        val versionPreparer = VersionPreparer(workspaceCache, VersionWorkspaceBuilder(BlobStore(tempDir.resolve("blobs")), fetcher), this)
+        val resolver = testResolver(fetcher, eulaGate, workspaceCache, tempDir)
 
         assertNull(workspaceCache.get("1.99-test"))
 
         val progress = mutableListOf<Int>()
-        val resolved = resolveWorkspace(VersionMetadataCache(fetcher), eulaGate, workspaceCache, versionPreparer, "1.99-test") { progress.add(it) }
+        val resolved = resolver.resolve("1.99-test") { progress.add(it) }
 
         assertTrue(resolved is ResolvedWorkspace.Ok, "expected Ok, got $resolved")
         resolved as ResolvedWorkspace.Ok
@@ -112,16 +112,79 @@ class ResolveWorkspaceTest {
         ))
         val eulaGate = EulaGate(tempDir.resolve("eula.txt"), env = mapOf("MCSRC_MCP_ACCEPT_EULA" to "1"))
         val workspaceCache = WorkspaceCache()
-        // A VersionPreparer wired to a fetcher that only answers the manifest - if resolveWorkspace
-        // tried to (re)prepare an already-cached workspace, VersionWorkspaceBuilder.build would
-        // fetch the detail/jar URLs and this fake would fail the test via error().
-        val versionPreparer = VersionPreparer(workspaceCache, VersionWorkspaceBuilder(BlobStore(tempDir.resolve("blobs")), fetcher), this)
+        // A resolver wired to a fetcher that only answers the manifest - if resolve tried to
+        // (re)prepare an already-cached workspace, VanillaWorkspaceBuilder.build would fetch the
+        // detail/jar URLs and this fake would fail the test via error().
+        val resolver = testResolver(fetcher, eulaGate, workspaceCache, tempDir)
         val prewarmedWorkspace = VersionWorkspace("1.99-test", io.github.ccbitz.mcsrcmcp.core.IndexData.empty(), null, emptyMap(), io.github.ccbitz.mcsrcmcp.core.Indexer(), emptyMap(), EmptyAssetSource, null)
         workspaceCache.put("1.99-test", prewarmedWorkspace)
 
-        val resolved = resolveWorkspace(VersionMetadataCache(fetcher), eulaGate, workspaceCache, versionPreparer, "1.99-test")
+        val resolved = resolver.resolve("1.99-test")
 
         assertTrue(resolved is ResolvedWorkspace.Ok, "expected Ok, got $resolved")
         assertSame(prewarmedWorkspace, (resolved as ResolvedWorkspace.Ok).workspace)
+    }
+
+    // diff_versions/diff_class declare a variant but resolve two workspaces - the argument has to
+    // survive the hop to both sides. A bogus id is the cheapest observable proof that it does.
+    @Test
+    fun `resolveBoth forwards the variant argument to both sides`(@TempDir tempDir: Path) = runTest {
+        val jarBytes = buildFixtureJar()
+        val version = VersionListEntry(
+            "1.99-test", "release", "https://example.invalid/1.99-test.json",
+            "2024-01-01T00:00:00+00:00", "2024-01-01T00:00:00+00:00", sha1(jarBytes),
+        )
+        val fetcher = RecordingFetcher(mapOf(
+            VERSION_MANIFEST_URL to Json.encodeToString(VersionManifest(listOf(version))).toByteArray(StandardCharsets.UTF_8),
+        ))
+        val resolver = testResolver(fetcher, EulaGate(tempDir.resolve("eula.txt"), env = mapOf("MCSRC_MCP_ACCEPT_EULA" to "1")), WorkspaceCache(), tempDir)
+
+        val resolved = resolver.resolveBoth("1.99-test", "1.99-test", "bogus")
+
+        assertTrue(resolved is ResolvedWorkspaces.Failed, "expected Failed, got $resolved")
+        val text = (resolved as ResolvedWorkspaces.Failed).result.content.single().let { it as io.modelcontextprotocol.kotlin.sdk.types.TextContent }.text
+        assertTrue(text.contains("unknown variant"), "got: $text")
+    }
+
+    // Variant resolution failures get a generic "failed to resolve" wrapper, but that wrapper must
+    // not swallow the version errors that have their own, more useful messages.
+    @Test
+    fun `resolve keeps the unknown-version message`(@TempDir tempDir: Path) = runTest {
+        val version = VersionListEntry(
+            "1.99-test", "release", "https://example.invalid/1.99-test.json",
+            "2024-01-01T00:00:00+00:00", "2024-01-01T00:00:00+00:00", "0".repeat(40),
+        )
+        val fetcher = RecordingFetcher(mapOf(
+            VERSION_MANIFEST_URL to Json.encodeToString(VersionManifest(listOf(version))).toByteArray(StandardCharsets.UTF_8),
+        ))
+        val resolver = testResolver(fetcher, EulaGate(tempDir.resolve("eula.txt"), env = mapOf("MCSRC_MCP_ACCEPT_EULA" to "1")), WorkspaceCache(), tempDir)
+
+        val resolved = resolver.resolve("nope")
+
+        assertTrue(resolved is ResolvedWorkspace.Failed, "expected Failed, got $resolved")
+        val text = (resolved as ResolvedWorkspace.Failed).result.content.single().let { it as io.modelcontextprotocol.kotlin.sdk.types.TextContent }.text
+        assertEquals("Unknown version 'nope'.", text)
+    }
+
+    private fun testResolver(
+        fetcher: BlobFetcher,
+        eulaGate: EulaGate,
+        workspaceCache: WorkspaceCache,
+        tempDir: Path,
+    ): WorkspaceResolver {
+        val metadata = VersionMetadataCache(fetcher)
+        val devBundleRepos = Variants.ALL
+            .mapNotNull { variant ->
+                variant.devBundleRepository?.let { variant.id to DevBundleRepository(variant.id, it, fetcher) }
+            }
+            .toMap()
+        val builders = VariantBuilders(
+            listOf(VanillaWorkspaceBuilder(BlobStore(tempDir.resolve("blobs")), fetcher)) +
+                Variants.ALL.filter { it.devBundleRepository != null }.map { variant ->
+                    DevBundleWorkspaceBuilder(variant.id, BlobStore(tempDir.resolve("blobs")), fetcher, null, devBundleRepos.getValue(variant.id))
+                },
+        )
+        val versionPreparer = VersionPreparer(workspaceCache, builders, kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Default))
+        return WorkspaceResolver(metadata, eulaGate, workspaceCache, versionPreparer, devBundleRepos)
     }
 }

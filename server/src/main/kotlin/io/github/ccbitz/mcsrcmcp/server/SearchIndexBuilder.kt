@@ -26,7 +26,7 @@ class SearchIndexBuilder(
      * sequential build this replaced.
      */
     suspend fun build(onProgress: (Int) -> Unit = {}): SearchIndex {
-        val sourceCacheDir = cacheDir.resolve("source/$SOURCE_CACHE_CONFIG_VERSION")
+        val sourceCacheDir = workspace.sourceCacheDir
         val classNames = workspace.remappedClasses.keys
             .filter { !it.contains('$') }
             .sorted()

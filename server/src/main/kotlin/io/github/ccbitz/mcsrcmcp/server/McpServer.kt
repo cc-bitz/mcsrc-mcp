@@ -69,6 +69,13 @@ Any tool prepares a cold version itself, so the first call against one can take 
 prepare_version only front-loads that wait and returns as soon as the version is queryable.
 Classes are dotted: net.minecraft.world.level.Level.
 
+Variants: every tool also takes an optional 'variant', defaulting to vanilla - leave it unset when
+vanilla sources are what you want, which is almost always. When the user asks for some server
+software's sources instead, call list_variants and pass the id it names; 'id' means that variant's
+latest build for the version, 'id/build' pins one. Assets, reports and game data always come from
+the vanilla client no matter what variant you pass, and classes that only exist in a variant have
+no public citation URL - cite them as class name + lines in plain text.
+
 Searching: name search first - search_classes (code), search_asset_files (assets). Use full-text
 search_code/search_assets only when that fails or you lack a name (e.g. a constant or string
 literal); search_code is heavy - preparing a version starts decompiling+indexing the jar in the
@@ -146,9 +153,11 @@ link text; plain URLs only where markdown isn't rendered.
 private val PREPARE_POLL_INTERVAL: Duration = Duration.ofSeconds(2)
 private val PREPARE_POLL_TIMEOUT: Duration = Duration.ofMinutes(25)
 
-// Bump if Vineflower's version or decompile options ever become configurable/change, so old
-// cached source under a stale config version is never read back as if it were current.
-internal const val SOURCE_CACHE_CONFIG_VERSION = "v1"
+// Bump if the per-class decompile cache's layout ever changes in a way that would make old cached
+// source unreadable or wrong under the new scheme - v1 keyed files by class name, v2 keys them by
+// a hash of the class bytes (sourceCacheKey) so variant builds can share the cache across builds.
+// Old directories under a stale version are inert, not actively cleaned up.
+internal const val SOURCE_CACHE_CONFIG_VERSION = "v2"
 
 // A model guessing at the schema sometimes reaches for "className" or "targetClass" instead of
 // the tool's documented "class" property - "targetClass" in particular echoes find_references'
@@ -249,6 +258,177 @@ internal sealed interface ResolvedWorkspace {
     data class Failed(val result: CallToolResult) : ResolvedWorkspace
 }
 
+internal sealed interface ResolvedWorkspaces {
+    data class Ok(
+        val workspaceA: VersionWorkspace,
+        val versionAId: String,
+        val workspaceB: VersionWorkspace,
+        val versionBId: String,
+    ) : ResolvedWorkspaces
+
+    data class Failed(val result: CallToolResult) : ResolvedWorkspaces
+}
+
+/**
+ * Everything a tool needs to turn a (version, variant) argument pair into a warm, ready-to-read
+ * [VersionWorkspace] - version metadata, each variant's dev-bundle resolution, and the
+ * prepare-if-cold loop. Every tool funnels through [resolve], so "just works on a cold version"
+ * and every variant's cache key are decided in exactly one place.
+ */
+internal class WorkspaceResolver(
+    private val metadata: VersionMetadataCache,
+    private val eulaGate: EulaGate,
+    private val workspaceCache: WorkspaceCache,
+    private val versionPreparer: VersionPreparer,
+    private val devBundles: Map<String, DevBundleRepository>,
+) {
+    /** A (version, variant) argument pair fully resolved: the Mojang version plus the request. */
+    data class ResolvedRequest(val version: io.github.ccbitz.mcsrcmcp.cache.VersionListEntry, val request: WorkspaceRequest)
+
+    /**
+     * Resolves the argument pair into the [WorkspaceRequest] every layer keys on. Vanilla needs no
+     * network beyond the manifest; a variant needs its build resolved from its own metadata -
+     * "latest" means whatever build the variant currently publishes for this Minecraft version,
+     * and a pinned build resolves deterministically. The resolved bundle rides on the request so
+     * the builder uses exactly this build instead of resolving "latest" a second time and possibly
+     * landing on a newer one than the workspace id names.
+     */
+    suspend fun resolveRequest(versionQuery: String, variantArg: String?): ResolvedRequest {
+        val spec = Variants.parse(variantArg)
+        val version = VersionResolver.resolve(versionQuery, metadata.manifest().versions)
+        if (spec.variant.id == Variants.VANILLA) {
+            return ResolvedRequest(version, WorkspaceRequest(Variants.VANILLA, null, version.id))
+        }
+
+        val repository = devBundles[spec.variant.id]
+            ?: throw UnknownVariantException(spec.variant.id, Variants.ALL.map { it.id })
+        val bundle = repository.resolve(version.id, spec.build)
+        val workspaceId = "${spec.variant.id}/${bundle.version}"
+        return ResolvedRequest(version, WorkspaceRequest(spec.variant.id, spec.build, workspaceId, bundle))
+    }
+
+    /**
+     * The cache key for a (version, variant) pair - what clear_cache uses to target the right
+     * derived directory.
+     */
+    suspend fun workspaceId(versionQuery: String, variantArg: String?): String =
+        resolveRequest(versionQuery, variantArg).request.workspaceId
+
+    /**
+     * Resolves [versionQuery]/[variantArg] to a warm workspace, preparing it inline (via
+     * [pollUntilReady]) instead of bouncing the caller back to prepare_version. [onProgress] is
+     * called with each distinct percent while preparing; a caller with no client to stream
+     * progress to (e.g. a test) can leave it as a no-op.
+     */
+    suspend fun resolve(
+        versionQuery: String,
+        variantArg: String? = null,
+        onProgress: suspend (percent: Int) -> Unit = {},
+    ): ResolvedWorkspace {
+        try {
+            eulaGate.requireAccepted()
+        } catch (e: EulaNotAcceptedException) {
+            return ResolvedWorkspace.Failed(
+                CallToolResult(content = listOf(TextContent(e.message ?: "EULA not accepted")), isError = true),
+            )
+        }
+
+        return try {
+            val (version, request) = resolveRequest(versionQuery, variantArg)
+
+            val workspaceId = request.workspaceId
+            workspaceCache.get(workspaceId)?.let { return ResolvedWorkspace.Ok(it, workspaceId) }
+
+            val detail = metadata.detail(version)
+            val result = pollUntilReady(
+                pollInterval = PREPARE_POLL_INTERVAL,
+                pollTimeout = PREPARE_POLL_TIMEOUT,
+                onProgress = onProgress,
+            ) { versionPreparer.prepare(request, version, detail) }
+
+            when (result) {
+                is PrepareVersionResult.Ready -> {
+                    val workspace = workspaceCache.get(workspaceId)
+                        // prepare() just reported Ready for this exact workspaceId, so this can only
+                        // happen if something evicted it in the instant between that and this read.
+                        ?: return ResolvedWorkspace.Failed(
+                            CallToolResult(
+                                content = listOf(TextContent("Version $workspaceId was prepared but is no longer warm - try again.")),
+                                isError = true,
+                            ),
+                        )
+                    ResolvedWorkspace.Ok(workspace, workspaceId)
+                }
+                is PrepareVersionResult.Preparing -> ResolvedWorkspace.Failed(
+                    CallToolResult(
+                        content = listOf(TextContent(
+                            "Version ${result.versionId} is still being prepared (${result.percent}%) after " +
+                                "${PREPARE_POLL_TIMEOUT.toMinutes()} minutes. Call prepare_version (or retry this tool) " +
+                                "to keep waiting.",
+                        )),
+                        isError = true,
+                    ),
+                )
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: UnknownVariantException) {
+            ResolvedWorkspace.Failed(
+                CallToolResult(content = listOf(TextContent(e.message ?: "unknown variant")), isError = true),
+            )
+        } catch (e: VariantSpecException) {
+            ResolvedWorkspace.Failed(
+                CallToolResult(content = listOf(TextContent(e.message ?: "invalid variant argument")), isError = true),
+            )
+        } catch (e: AmbiguousVersionException) {
+            ResolvedWorkspace.Failed(
+                CallToolResult(
+                    content = listOf(TextContent("Ambiguous version '$versionQuery'. Candidates: ${e.candidates.joinToString()}")),
+                    isError = true,
+                ),
+            )
+        } catch (e: UnknownVersionException) {
+            ResolvedWorkspace.Failed(
+                CallToolResult(content = listOf(TextContent("Unknown version '$versionQuery'.")), isError = true),
+            )
+        } catch (e: Exception) {
+            // Anything untyped is still a clean tool error, not a crash: an unpublished build id, a
+            // version the variant doesn't ship, the repo being down, or a build failing partway.
+            // Caught last so it can't shadow the typed version errors above and their messages.
+            val variantLabel = variantArg?.trim()?.takeIf { it.isNotEmpty() } ?: Variants.VANILLA
+            ResolvedWorkspace.Failed(
+                CallToolResult(
+                    content = listOf(TextContent("Failed to resolve $variantLabel sources for $versionQuery: ${e.message}")),
+                    isError = true,
+                ),
+            )
+        }
+    }
+
+    /** [resolve] for the diff tools' two workspaces, same variant applied to both sides. */
+    suspend fun resolveBoth(
+        versionAQuery: String,
+        versionBQuery: String,
+        variantArg: String? = null,
+        onProgress: suspend (versionLabel: String, percent: Int) -> Unit = { _, _ -> },
+    ): ResolvedWorkspaces {
+        when (val a = resolve(versionAQuery, variantArg) { onProgress(versionAQuery, it) }) {
+            is ResolvedWorkspace.Failed -> return ResolvedWorkspaces.Failed(a.result)
+            is ResolvedWorkspace.Ok -> {
+                when (val b = resolve(versionBQuery, variantArg) { onProgress(versionBQuery, it) }) {
+                    is ResolvedWorkspace.Failed -> return ResolvedWorkspaces.Failed(b.result)
+                    is ResolvedWorkspace.Ok -> return ResolvedWorkspaces.Ok(
+                        a.workspace,
+                        a.versionId,
+                        b.workspace,
+                        b.versionId,
+                    )
+                }
+            }
+        }
+    }
+}
+
 // Shared by get_report: everything between "a warm workspace" and "a completed reports
 // directory" - cache-dir check, data-generator presence check, version detail + client jar
 // resolution, and the lazy single-flight datagen run itself.
@@ -323,117 +503,6 @@ private suspend fun prepareReports(
     }
 }
 
-private sealed interface ResolvedWorkspaces {
-    data class Ok(
-        val workspaceA: VersionWorkspace,
-        val versionAId: String,
-        val workspaceB: VersionWorkspace,
-        val versionBId: String,
-    ) : ResolvedWorkspaces
-
-    data class Failed(val result: CallToolResult) : ResolvedWorkspaces
-}
-
-private suspend fun resolveWorkspaces(
-    metadata: VersionMetadataCache,
-    eulaGate: EulaGate,
-    workspaceCache: WorkspaceCache,
-    versionPreparer: VersionPreparer,
-    versionAQuery: String,
-    versionBQuery: String,
-    onProgress: suspend (versionLabel: String, percent: Int) -> Unit = { _, _ -> },
-): ResolvedWorkspaces {
-    when (val a = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionAQuery) { onProgress(versionAQuery, it) }) {
-        is ResolvedWorkspace.Failed -> return ResolvedWorkspaces.Failed(a.result)
-        is ResolvedWorkspace.Ok -> {
-            when (val b = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionBQuery) { onProgress(versionBQuery, it) }) {
-                is ResolvedWorkspace.Failed -> return ResolvedWorkspaces.Failed(b.result)
-                is ResolvedWorkspace.Ok -> return ResolvedWorkspaces.Ok(
-                    a.workspace,
-                    a.versionId,
-                    b.workspace,
-                    b.versionId,
-                )
-            }
-        }
-    }
-}
-
-/**
- * Resolves [versionQuery] to a warm, ready-to-read [VersionWorkspace]. If it isn't warm yet,
- * prepares it inline (via [pollUntilReady]) instead of bouncing the caller back to
- * prepare_version - most tools funnel through here, so this is the one place that needs to
- * know how to warm a version, and every read tool gets "just works on a cold version" for free.
- * [onProgress] is called with each distinct percent while preparing; a caller with no client to
- * stream progress to (e.g. a test) can leave it as a no-op.
- */
-internal suspend fun resolveWorkspace(
-    metadata: VersionMetadataCache,
-    eulaGate: EulaGate,
-    workspaceCache: WorkspaceCache,
-    versionPreparer: VersionPreparer,
-    versionQuery: String,
-    onProgress: suspend (percent: Int) -> Unit = {},
-): ResolvedWorkspace {
-    try {
-        eulaGate.requireAccepted()
-    } catch (e: EulaNotAcceptedException) {
-        return ResolvedWorkspace.Failed(
-            CallToolResult(content = listOf(TextContent(e.message ?: "EULA not accepted")), isError = true),
-        )
-    }
-
-    return try {
-        val manifest = metadata.manifest()
-        val version = VersionResolver.resolve(versionQuery, manifest.versions)
-
-        workspaceCache.get(version.id)?.let { return ResolvedWorkspace.Ok(it, version.id) }
-
-        val detail = metadata.detail(version)
-        val result = pollUntilReady(
-            pollInterval = PREPARE_POLL_INTERVAL,
-            pollTimeout = PREPARE_POLL_TIMEOUT,
-            onProgress = onProgress,
-        ) { versionPreparer.prepare(version, detail) }
-
-        when (result) {
-            is PrepareVersionResult.Ready -> {
-                val workspace = workspaceCache.get(version.id)
-                    // prepare() just reported Ready for this exact version.id, so this can only
-                    // happen if something evicted it in the instant between that and this read.
-                    ?: return ResolvedWorkspace.Failed(
-                        CallToolResult(
-                            content = listOf(TextContent("Version ${version.id} was prepared but is no longer warm - try again.")),
-                            isError = true,
-                        ),
-                    )
-                ResolvedWorkspace.Ok(workspace, version.id)
-            }
-            is PrepareVersionResult.Preparing -> ResolvedWorkspace.Failed(
-                CallToolResult(
-                    content = listOf(TextContent(
-                        "Version ${result.versionId} is still being prepared (${result.percent}%) after " +
-                            "${PREPARE_POLL_TIMEOUT.toMinutes()} minutes. Call prepare_version (or retry this tool) " +
-                            "to keep waiting.",
-                    )),
-                    isError = true,
-                ),
-            )
-        }
-    } catch (e: AmbiguousVersionException) {
-        ResolvedWorkspace.Failed(
-            CallToolResult(
-                content = listOf(TextContent("Ambiguous version '$versionQuery'. Candidates: ${e.candidates.joinToString()}")),
-                isError = true,
-            ),
-        )
-    } catch (e: UnknownVersionException) {
-        ResolvedWorkspace.Failed(
-            CallToolResult(content = listOf(TextContent("Unknown version '$versionQuery'.")), isError = true),
-        )
-    }
-}
-
 fun buildServer(
     cacheRoot: Path = CacheRoot.resolve(),
     fetcher: BlobFetcher = HttpBlobFetcher(),
@@ -444,10 +513,24 @@ fun buildServer(
 
     val blobStore = BlobStore(cacheRoot.resolve("blobs"))
     val workspaceCache = WorkspaceCache()
-    val versionPreparer = VersionPreparer(workspaceCache, VersionWorkspaceBuilder(blobStore, fetcher, cacheRoot), scope)
+    val metadata = VersionMetadataCache(fetcher, cacheRoot)
+    // One dev-bundle repository (and one builder) per registered fork - the registry is the
+    // single source of truth, so a new fork is a Variant entry and nothing else.
+    val devBundleRepos = Variants.ALL
+        .mapNotNull { variant ->
+            variant.devBundleRepository?.let { variant.id to DevBundleRepository(variant.id, it, fetcher, cacheRoot.resolve("meta")) }
+        }
+        .toMap()
+    val builders = VariantBuilders(
+        listOf(VanillaWorkspaceBuilder(blobStore, fetcher, cacheRoot)) +
+            Variants.ALL.filter { it.devBundleRepository != null }.map { variant ->
+                DevBundleWorkspaceBuilder(variant.id, blobStore, fetcher, cacheRoot, devBundleRepos.getValue(variant.id))
+            },
+    )
+    val versionPreparer = VersionPreparer(workspaceCache, builders, scope, cacheRoot)
+    val resolver = WorkspaceResolver(metadata, eulaGate, workspaceCache, versionPreparer, devBundleRepos)
     val reportGenerator = ReportGenerator(blobStore, fetcher, cacheRoot, scope)
     val gameBridge = GameBridge(blobStore, fetcher, cacheRoot)
-    val metadata = VersionMetadataCache(fetcher, cacheRoot)
 
     val server = Server(
         serverInfo = Implementation(
@@ -462,7 +545,7 @@ fun buildServer(
         instructions = AGENT_INSTRUCTIONS.trim(),
     )
 
-    server.registerTools(metadata, eulaGate, workspaceCache, versionPreparer, reportGenerator, gameBridge, cacheRoot, blobStore)
+    server.registerTools(metadata, eulaGate, resolver, versionPreparer, reportGenerator, gameBridge, cacheRoot, blobStore)
     return server
 }
 
@@ -487,6 +570,18 @@ private fun JsonObjectBuilder.boolProp(name: String, description: String) = putJ
 private fun JsonObjectBuilder.versionProp() = stringProp("version", "Version id or alias")
 private fun JsonObjectBuilder.classProp() = stringProp("class", "Dotted class name")
 private fun JsonObjectBuilder.limitProp(default: Int) = intProp("limit", "Max results (default $default)")
+
+// Variant is deliberately unopinionated about which variants exist - list_variants names them.
+// Read tools that consume one workspace pass the caller's argument through; asset/report/game
+// tools accept it for consistency but always serve vanilla.
+private fun JsonObjectBuilder.variantProp() =
+    stringProp("variant", "Source variant id, or 'id/build' to pin a build (see list_variants); defaults to vanilla")
+
+private fun JsonObjectBuilder.variantIgnoredProp(kind: String) =
+    stringProp("variant", "Ignored: $kind always come from the vanilla client, whatever this is set to")
+
+internal fun CallToolRequest.variantArg(): String? =
+    arguments?.get("variant")?.jsonPrimitive?.contentOrNull
 
 private fun JsonObjectBuilder.lineRangeProps() {
     intProp("start_line", "First line, 1-indexed (default 1)")
@@ -516,7 +611,7 @@ private fun JsonObjectBuilder.stringOrArrayProp(name: String, description: Strin
 private fun Server.registerTools(
     metadata: VersionMetadataCache,
     eulaGate: EulaGate,
-    workspaceCache: WorkspaceCache,
+    resolver: WorkspaceResolver,
     versionPreparer: VersionPreparer,
     reportGenerator: ReportGenerator,
     gameBridge: GameBridge,
@@ -565,6 +660,32 @@ private fun Server.registerTools(
         }
     }
 
+    // Like list_versions, metadata-only - a variant list never touches Minecraft content, so it
+    // is deliberately NOT EULA-gated. Deliberately unopinionated about which variants exist: the
+    // registry is the single source of truth, so the guide text never has to change when one is
+    // added.
+    addTool(
+        name = "list_variants",
+        description = "List the source variants this server can serve (vanilla plus any registered " +
+            "server-software flavors), with the ids the 'variant' argument takes. No arguments.",
+        inputSchema = ToolSchema(properties = buildJsonObject {}),
+        toolAnnotations = ToolAnnotations(
+            readOnlyHint = true,
+            destructiveHint = false,
+            idempotentHint = true,
+            openWorldHint = false,
+        ),
+    ) { _ ->
+        val result = Variants.ALL.map { variant ->
+            buildJsonObject {
+                put("id", variant.id)
+                put("title", variant.title)
+                put("description", variant.description)
+            }
+        }
+        CallToolResult(content = listOf(TextContent(Json.encodeToString(result))))
+    }
+
     addTool(
         name = "prepare_version",
         description = "Warm up a version (download, remap, index) up front. Optional - every other " +
@@ -573,7 +694,10 @@ private fun Server.registerTools(
             "making you poll; the full-text search index keeps building in the background and is " +
             "waited on by the first search_code/search_assets call. If this times out, call again.",
         inputSchema = ToolSchema(
-            properties = buildJsonObject { versionProp() },
+            properties = buildJsonObject {
+                versionProp()
+                variantProp()
+            },
             required = listOf("version"),
         ),
     ) { request ->
@@ -585,17 +709,19 @@ private fun Server.registerTools(
 
         val versionQuery = request.arguments?.get("version")?.jsonPrimitive?.content
             ?: return@addTool CallToolResult(content = listOf(TextContent("The 'version' parameter is required.")), isError = true)
+        val variantArg = request.variantArg()
 
         try {
-            val manifest = metadata.manifest()
-            val version = VersionResolver.resolve(versionQuery, manifest.versions)
+            // One resolution covers the id, the version and the bundle, so "latest" is picked
+            // exactly once and the workspace built is the one the result names.
+            val (version, prepareRequest) = resolver.resolveRequest(versionQuery, variantArg)
             val detail = metadata.detail(version)
 
             val result = pollUntilReady(
                 pollInterval = PREPARE_POLL_INTERVAL,
                 pollTimeout = PREPARE_POLL_TIMEOUT,
-                onProgress = { percent -> sendPrepareProgress(request.meta?.progressToken, version.id, percent) },
-            ) { versionPreparer.prepare(version, detail) }
+                onProgress = { percent -> sendPrepareProgress(request.meta?.progressToken, prepareRequest.workspaceId, percent) },
+            ) { versionPreparer.prepare(prepareRequest, version, detail) }
 
             val text = when (result) {
                 is PrepareVersionResult.Ready -> "Version ${result.versionId} is ready."
@@ -604,6 +730,16 @@ private fun Server.registerTools(
                         "${PREPARE_POLL_TIMEOUT.toMinutes()} minutes. Call prepare_version again to keep waiting."
             }
             CallToolResult(content = listOf(TextContent(text)))
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: UnknownVariantException) {
+            CallToolResult(content = listOf(TextContent(e.message ?: "unknown variant")), isError = true)
+        } catch (e: VariantSpecException) {
+            CallToolResult(content = listOf(TextContent(e.message ?: "invalid variant argument")), isError = true)
+        } catch (e: DevBundleNotFoundException) {
+            CallToolResult(content = listOf(TextContent(e.message ?: "no build found")), isError = true)
+        } catch (e: DevBundleAmbiguousException) {
+            CallToolResult(content = listOf(TextContent(e.message ?: "ambiguous build")), isError = true)
         } catch (e: AmbiguousVersionException) {
             CallToolResult(
                 content = listOf(TextContent("Ambiguous version '$versionQuery'. Candidates: ${e.candidates.joinToString()}")),
@@ -628,6 +764,7 @@ private fun Server.registerTools(
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 stringProp("version", "Version id or alias; omit to clear every version")
+                variantProp()
             },
         ),
         toolAnnotations = ToolAnnotations(
@@ -645,15 +782,37 @@ private fun Server.registerTools(
                 CacheEviction.evictAllDerived(cacheRoot)
                 return@addTool CallToolResult(content = listOf(TextContent("Cleared cached data for all versions.")))
             }
+        val variantArg = request.variantArg()
 
         try {
-            val manifest = metadata.manifest()
-            val version = VersionResolver.resolve(versionQuery, manifest.versions)
-            versionPreparer.clear(version.id)
-            reportGenerator.clear(version.id)
-            gameBridge.clear(version.id)
-            CacheEviction.evictVersion(cacheRoot, version.id)
-            CallToolResult(content = listOf(TextContent("Cleared cached data for version ${version.id}.")))
+            val (version, request) = resolver.resolveRequest(versionQuery, variantArg)
+            val workspaceId = request.workspaceId
+
+            versionPreparer.clear(workspaceId)
+            CacheEviction.evictVersion(cacheRoot, workspaceId)
+            // A fork's shared decompile cache lives outside its per-build directories, so the
+            // per-workspace eviction above leaves it - clear it too. derived/<fork>/<mcVersion>
+            // holds nothing but that cache (see sharedSourceCacheDir), and it is never empty by
+            // now, so it goes recursively like any other derived directory.
+            if (request.variant != Variants.VANILLA) {
+                CacheEviction.evictVersion(cacheRoot, "${request.variant}/${version.id}")
+            } else {
+                // Reports and game data only ever exist for vanilla workspaces - they are generated
+                // from the client jar, which a variant workspace doesn't hold.
+                reportGenerator.clear(version.id)
+                gameBridge.clear(version.id)
+            }
+            CallToolResult(content = listOf(TextContent("Cleared cached data for $workspaceId.")))
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: UnknownVariantException) {
+            CallToolResult(content = listOf(TextContent(e.message ?: "unknown variant")), isError = true)
+        } catch (e: VariantSpecException) {
+            CallToolResult(content = listOf(TextContent(e.message ?: "invalid variant argument")), isError = true)
+        } catch (e: DevBundleNotFoundException) {
+            CallToolResult(content = listOf(TextContent(e.message ?: "no build found")), isError = true)
+        } catch (e: DevBundleAmbiguousException) {
+            CallToolResult(content = listOf(TextContent(e.message ?: "ambiguous build")), isError = true)
         } catch (e: AmbiguousVersionException) {
             CallToolResult(
                 content = listOf(TextContent("Ambiguous version '$versionQuery'. Candidates: ${e.candidates.joinToString()}")),
@@ -661,6 +820,8 @@ private fun Server.registerTools(
             )
         } catch (e: UnknownVersionException) {
             CallToolResult(content = listOf(TextContent("Unknown version '$versionQuery'.")), isError = true)
+        } catch (e: Exception) {
+            CallToolResult(content = listOf(TextContent("Failed to resolve version metadata: ${e.message}")), isError = true)
         }
     }
 
@@ -671,6 +832,7 @@ private fun Server.registerTools(
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
+                variantProp()
                 classProp()
             },
             required = listOf("version", "class"),
@@ -681,7 +843,7 @@ private fun Server.registerTools(
         val className = request.classArg()
             ?: return@addTool CallToolResult(content = listOf(TextContent("The 'class' parameter is required.")), isError = true)
 
-        when (val resolved = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionQuery) { percent ->
+        when (val resolved = resolver.resolve(versionQuery, request.variantArg()) { percent ->
             sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
@@ -701,6 +863,7 @@ private fun Server.registerTools(
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
+                variantProp()
                 classProp()
                 lineRangeProps()
             },
@@ -714,12 +877,12 @@ private fun Server.registerTools(
         val startLine = request.arguments?.get("start_line")?.jsonPrimitive?.intOrNull ?: 1
         val maxLines = request.arguments?.get("max_lines")?.jsonPrimitive?.intOrNull ?: 1500
 
-        when (val resolved = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionQuery) { percent ->
+        when (val resolved = resolver.resolve(versionQuery, request.variantArg()) { percent ->
             sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
             is ResolvedWorkspace.Ok -> try {
-                val sourceCacheDir = resolved.workspace.cacheDir?.resolve("source/$SOURCE_CACHE_CONFIG_VERSION")
+                val sourceCacheDir = resolved.workspace.sourceCacheDir
                 val source = getClassSourceToolLogic(resolved.workspace.remappedClasses, className, startLine, maxLines, sourceCacheDir)
                 val text = formatContentResult(source.className, source.source, source.startLine, source.totalLines, source.truncated)
                 CallToolResult(content = listOf(TextContent(text)))
@@ -746,6 +909,7 @@ private fun Server.registerTools(
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
+                variantProp()
                 classProp()
                 lineRangeProps()
             },
@@ -759,7 +923,7 @@ private fun Server.registerTools(
         val startLine = request.arguments?.get("start_line")?.jsonPrimitive?.intOrNull ?: 1
         val maxLines = request.arguments?.get("max_lines")?.jsonPrimitive?.intOrNull ?: 1500
 
-        when (val resolved = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionQuery) { percent ->
+        when (val resolved = resolver.resolve(versionQuery, request.variantArg()) { percent ->
             sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
@@ -779,6 +943,7 @@ private fun Server.registerTools(
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
+                variantProp()
                 stringProp("package", "Dotted package name (empty for root)")
                 boolProp("recursive", "Recurse into subpackages (default false)")
             },
@@ -790,7 +955,7 @@ private fun Server.registerTools(
         val dottedPackage = request.arguments?.get("package")?.jsonPrimitive?.content ?: ""
         val recursive = request.arguments?.get("recursive")?.jsonPrimitive?.content?.toBoolean() ?: false
 
-        when (val resolved = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionQuery) { percent ->
+        when (val resolved = resolver.resolve(versionQuery, request.variantArg()) { percent ->
             sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
@@ -809,6 +974,7 @@ private fun Server.registerTools(
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
+                variantProp()
                 stringProp("query", "Class name substring, or an acronym like 'LC' for LevelChunk")
                 limitProp(100)
             },
@@ -821,7 +987,7 @@ private fun Server.registerTools(
             ?: return@addTool CallToolResult(content = listOf(TextContent("The 'query' parameter is required.")), isError = true)
         val limit = request.arguments?.get("limit")?.jsonPrimitive?.intOrNull ?: 100
 
-        when (val resolved = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionQuery) { percent ->
+        when (val resolved = resolver.resolve(versionQuery, request.variantArg()) { percent ->
             sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
@@ -849,6 +1015,7 @@ private fun Server.registerTools(
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
+                variantProp()
                 classProp()
                 stringProp("member", "Bare member name, e.g. getBlockState; omit for the class itself")
                 stringProp("kind", "'method' or 'field', if a name is both")
@@ -865,7 +1032,7 @@ private fun Server.registerTools(
         val kind = request.arguments?.get("kind")?.jsonPrimitive?.content
         val resolveDeclaration = request.arguments?.get("resolve_declaration")?.jsonPrimitive?.content?.toBoolean() ?: true
 
-        when (val resolved = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionQuery) { percent ->
+        when (val resolved = resolver.resolve(versionQuery, request.variantArg()) { percent ->
             sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
@@ -905,6 +1072,7 @@ private fun Server.registerTools(
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
+                variantProp()
                 classProp()
                 intProp("line", "Line to resolve, as numbered by get_class_source")
                 intProp("bytecode_line", "Instead of 'line': a line as numbered by get_bytecode, to resolve one instruction's target")
@@ -931,12 +1099,12 @@ private fun Server.registerTools(
             )
         }
 
-        when (val resolved = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionQuery) { percent ->
+        when (val resolved = resolver.resolve(versionQuery, request.variantArg()) { percent ->
             sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
             is ResolvedWorkspace.Ok -> try {
-                val sourceCacheDir = resolved.workspace.cacheDir?.resolve("source/$SOURCE_CACHE_CONFIG_VERSION")
+                val sourceCacheDir = resolved.workspace.sourceCacheDir
                 val result = findDeclarationToolLogic(
                     resolved.workspace.indexData,
                     resolved.workspace.remappedClasses,
@@ -963,6 +1131,7 @@ private fun Server.registerTools(
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
+                variantProp()
                 classProp()
                 stringProp("direction", "'supertypes' (default) or 'subtypes'")
                 intProp("depth", "Levels to expand (default 1)")
@@ -977,7 +1146,7 @@ private fun Server.registerTools(
         val direction = request.arguments?.get("direction")?.jsonPrimitive?.content ?: "supertypes"
         val depth = request.arguments?.get("depth")?.jsonPrimitive?.intOrNull ?: 1
 
-        when (val resolved = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionQuery) { percent ->
+        when (val resolved = resolver.resolve(versionQuery, request.variantArg()) { percent ->
             sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
@@ -1000,6 +1169,7 @@ private fun Server.registerTools(
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
+                variantIgnoredProp("assets")
                 stringProp("path_prefix", "Asset path prefix, e.g. assets/minecraft/lang (empty for all)")
                 limitProp(200)
             },
@@ -1011,7 +1181,7 @@ private fun Server.registerTools(
         val pathPrefix = request.arguments?.get("path_prefix")?.jsonPrimitive?.content ?: ""
         val limit = request.arguments?.get("limit")?.jsonPrimitive?.intOrNull ?: 200
 
-        when (val resolved = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionQuery) { percent ->
+        when (val resolved = resolver.resolve(versionQuery) { percent ->
             sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
@@ -1030,6 +1200,7 @@ private fun Server.registerTools(
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
+                variantIgnoredProp("assets")
                 stringProp("path", "Exact asset path, e.g. assets/minecraft/items/allium.json")
                 lineRangeProps()
             },
@@ -1043,7 +1214,7 @@ private fun Server.registerTools(
         val startLine = request.arguments?.get("start_line")?.jsonPrimitive?.intOrNull ?: 1
         val maxLines = request.arguments?.get("max_lines")?.jsonPrimitive?.intOrNull ?: 1500
 
-        when (val resolved = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionQuery) { percent ->
+        when (val resolved = resolver.resolve(versionQuery) { percent ->
             sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
@@ -1066,6 +1237,7 @@ private fun Server.registerTools(
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
+                variantIgnoredProp("assets")
                 stringProp("path", "Exact jar entry path, e.g. assets/minecraft/textures/block/stone.png")
                 stringProp("destination", "Local filesystem path to write the file to")
             },
@@ -1083,7 +1255,7 @@ private fun Server.registerTools(
         // agent knows nothing about.
         val destination = Path.of(destinationString).toAbsolutePath().normalize()
 
-        when (val resolved = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionQuery) { percent ->
+        when (val resolved = resolver.resolve(versionQuery) { percent ->
             sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
@@ -1109,6 +1281,7 @@ private fun Server.registerTools(
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
+                variantIgnoredProp("reports")
                 stringProp("report", "Report file or directory under reports/, e.g. 'registries' or 'minecraft/components/item'; omit to list the root")
                 lineRangeProps()
                 limitProp(200)
@@ -1123,7 +1296,7 @@ private fun Server.registerTools(
         val maxLines = request.arguments?.get("max_lines")?.jsonPrimitive?.intOrNull ?: 1500
         val limit = request.arguments?.get("limit")?.jsonPrimitive?.intOrNull ?: 200
 
-        when (val resolved = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionQuery) { percent ->
+        when (val resolved = resolver.resolve(versionQuery) { percent ->
             sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
@@ -1163,6 +1336,7 @@ private fun Server.registerTools(
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
+                variantIgnoredProp("reports")
                 stringProp("prefix", "Directory under reports/ to list (only meaningful once generated), e.g. 'minecraft/components'")
                 limitProp(200)
             },
@@ -1174,7 +1348,7 @@ private fun Server.registerTools(
         val prefix = request.arguments?.get("prefix")?.jsonPrimitive?.content?.trim().orEmpty()
         val limit = request.arguments?.get("limit")?.jsonPrimitive?.intOrNull ?: 200
 
-        when (val resolved = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionQuery) { percent ->
+        when (val resolved = resolver.resolve(versionQuery) { percent ->
             sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
@@ -1201,6 +1375,7 @@ private fun Server.registerTools(
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
+                variantIgnoredProp("assets")
                 stringProp("prefix", "Path prefix to list one level under (empty for the jar root)")
                 limitProp(200)
             },
@@ -1212,7 +1387,7 @@ private fun Server.registerTools(
         val prefix = request.arguments?.get("prefix")?.jsonPrimitive?.content?.trim().orEmpty()
         val limit = request.arguments?.get("limit")?.jsonPrimitive?.intOrNull ?: 200
 
-        when (val resolved = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionQuery) { percent ->
+        when (val resolved = resolver.resolve(versionQuery) { percent ->
             sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
@@ -1233,6 +1408,7 @@ private fun Server.registerTools(
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
+                variantIgnoredProp("game data")
                 classProp()
                 stringProp("field", "Static field name, e.g. COMPOSTABLES")
                 lineRangeProps()
@@ -1249,7 +1425,7 @@ private fun Server.registerTools(
         val startLine = request.arguments?.get("start_line")?.jsonPrimitive?.intOrNull ?: 1
         val maxLines = request.arguments?.get("max_lines")?.jsonPrimitive?.intOrNull ?: 1500
 
-        when (val resolved = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionQuery) { percent ->
+        when (val resolved = resolver.resolve(versionQuery) { percent ->
             sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
@@ -1296,6 +1472,7 @@ private fun Server.registerTools(
             properties = buildJsonObject {
                 stringProp("version_a", "First version id or alias")
                 stringProp("version_b", "Second version id or alias")
+                stringProp("variant", "Source variant applied to both sides; defaults to vanilla")
                 stringProp("package", "Package prefix filter, dotted or slashed (default: all)")
             },
             required = listOf("version_a", "version_b"),
@@ -1309,7 +1486,7 @@ private fun Server.registerTools(
             ?.replace('.', '/')
             ?: ""
 
-        when (val resolved = resolveWorkspaces(metadata, eulaGate, workspaceCache, versionPreparer, versionAQuery, versionBQuery) { versionLabel, percent ->
+        when (val resolved = resolver.resolveBoth(versionAQuery, versionBQuery, request.variantArg()) { versionLabel, percent ->
             sendPrepareProgress(request.meta?.progressToken, versionLabel, percent)
         }) {
             is ResolvedWorkspaces.Failed -> resolved.result
@@ -1327,6 +1504,7 @@ private fun Server.registerTools(
             properties = buildJsonObject {
                 stringProp("version_a", "First version id or alias")
                 stringProp("version_b", "Second version id or alias")
+                stringProp("variant", "Source variant applied to both sides; defaults to vanilla")
                 classProp()
                 intProp("context", "Lines of context around each change (default 3)")
             },
@@ -1341,7 +1519,7 @@ private fun Server.registerTools(
             ?: return@addTool CallToolResult(content = listOf(TextContent("The 'class' parameter is required.")), isError = true)
         val context = request.arguments?.get("context")?.jsonPrimitive?.intOrNull ?: 3
 
-        when (val resolved = resolveWorkspaces(metadata, eulaGate, workspaceCache, versionPreparer, versionAQuery, versionBQuery) { versionLabel, percent ->
+        when (val resolved = resolver.resolveBoth(versionAQuery, versionBQuery, request.variantArg()) { versionLabel, percent ->
             sendPrepareProgress(request.meta?.progressToken, versionLabel, percent)
         }) {
             is ResolvedWorkspaces.Failed -> resolved.result
@@ -1374,6 +1552,7 @@ private fun Server.registerTools(
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
+                variantIgnoredProp("assets")
                 stringProp("query", "Filename substring, e.g. 'stone' or 'oak_planks'")
                 limitProp(100)
             },
@@ -1386,7 +1565,7 @@ private fun Server.registerTools(
             ?: return@addTool CallToolResult(content = listOf(TextContent("The 'query' parameter is required.")), isError = true)
         val limit = request.arguments?.get("limit")?.jsonPrimitive?.intOrNull ?: 100
 
-        when (val resolved = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionQuery) { percent ->
+        when (val resolved = resolver.resolve(versionQuery) { percent ->
             sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
@@ -1408,6 +1587,7 @@ private fun Server.registerTools(
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
+                variantProp()
                 stringProp("query", "Substring, or a regex pattern if regex=true")
                 boolProp("regex", "Treat query as a regex (default false)")
                 limitProp(100)
@@ -1427,7 +1607,7 @@ private fun Server.registerTools(
         val exclude = request.arguments?.get("exclude")?.jsonPrimitive?.content
         val exactCount = request.arguments?.get("exact_count")?.jsonPrimitive?.content?.toBoolean() ?: false
 
-        when (val resolved = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionQuery) { percent ->
+        when (val resolved = resolver.resolve(versionQuery, request.variantArg()) { percent ->
             sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
@@ -1463,6 +1643,7 @@ private fun Server.registerTools(
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
+                variantIgnoredProp("assets")
                 stringProp("query", "Substring, or a regex pattern if regex=true")
                 boolProp("regex", "Treat query as a regex (default false)")
                 limitProp(100)
@@ -1482,7 +1663,7 @@ private fun Server.registerTools(
         val exclude = request.arguments?.get("exclude")?.jsonPrimitive?.content
         val exactCount = request.arguments?.get("exact_count")?.jsonPrimitive?.content?.toBoolean() ?: false
 
-        when (val resolved = resolveWorkspace(metadata, eulaGate, workspaceCache, versionPreparer, versionQuery) { percent ->
+        when (val resolved = resolver.resolve(versionQuery) { percent ->
             sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
         }) {
             is ResolvedWorkspace.Failed -> resolved.result

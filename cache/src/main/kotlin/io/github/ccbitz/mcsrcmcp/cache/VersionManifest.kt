@@ -28,6 +28,9 @@ data class VersionDetail(
 data class VersionDownloads(
     val client: DownloadArtifact,
     @SerialName("client_mappings") val clientMappings: DownloadArtifact? = null,
+    // Variant builds (paper and friends) binpatch this jar rather than the client's, so a paper
+    // workspace never touches the client artifact.
+    val server: DownloadArtifact? = null,
 )
 
 @Serializable
