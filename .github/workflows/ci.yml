@@ -38,3 +38,49 @@ jobs:
           name: test-reports
           path: "**/build/reports/tests/**"
           if-no-files-found: ignore
+
+  nightly:
+    name: Publish nightly build
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # Its own job so only this one holds a write token; PR builds keep the read-only default.
+    permissions:
+      contents: write
+    # Queued runs collapse to the newest commit, so a slow older run can't overwrite a newer
+    # nightly. A running publish finishes rather than getting cancelled halfway through its upload.
+    concurrency:
+      group: nightly
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          cache-provider: basic
+
+      # Rebuilding here costs a compile, but handing the jar over from the build job would need
+      # upload-artifact, which act can't run, so the whole job would break locally.
+      - name: Build distribution
+        run: sh ./gradlew :server:dist --stacktrace
+
+      - name: Update nightly-build release
+        # act has no real GITHUB_TOKEN; publishing only runs on GitHub.
+        if: env.ACT == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # The tag moves to this commit so the release's source archives match its jar. Tags pushed
+        # with GITHUB_TOKEN don't trigger workflows, and release.yml only listens for v* anyway.
+        run: |
+          git tag -f nightly-build
+          git push -f origin refs/tags/nightly-build
+          gh release upload nightly-build dist/mcsrc-mcp.jar dist/mcsrc-mcp.bat --clobber
+          gh release edit nightly-build --prerelease --notes "Built from ${GITHUB_SHA} on $(date -u +%Y-%m-%d)."
