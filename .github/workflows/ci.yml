@@ -28,7 +28,7 @@ jobs:
           cache-provider: basic
 
       - name: Build
-        run: sh ./gradlew build :server:fatJar --stacktrace
+        run: sh ./gradlew build :server:dist --stacktrace
 
       - name: Upload test reports
         # act has no ACTIONS_RUNTIME_TOKEN, and env.ACT is its own marker variable.
@@ -38,6 +38,15 @@ jobs:
           name: test-reports
           path: "**/build/reports/tests/**"
           if-no-files-found: ignore
+
+      # Hands the tested jar to the nightly job, so what gets published is exactly what passed.
+      - name: Upload distribution
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          retention-days: 1
 
   nightly:
     name: Publish nightly build
@@ -53,34 +62,20 @@ jobs:
       group: nightly
       cancel-in-progress: false
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      - name: Download distribution
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          distribution: temurin
-          java-version: "21"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
-        with:
-          cache-provider: basic
-
-      # Rebuilding here costs a compile, but handing the jar over from the build job would need
-      # upload-artifact, which act can't run, so the whole job would break locally.
-      - name: Build distribution
-        run: sh ./gradlew :server:dist --stacktrace
+          name: dist
+          path: dist
 
       - name: Update nightly-build release
-        # act has no real GITHUB_TOKEN; publishing only runs on GitHub.
-        if: env.ACT == ''
         env:
           GH_TOKEN: ${{ github.token }}
-        # The tag moves to this commit so the release's source archives match its jar. Tags pushed
-        # with GITHUB_TOKEN don't trigger workflows, and release.yml only listens for v* anyway.
+          GH_REPO: ${{ github.repository }}
+        # The tag moves to this commit so the release's source archives match its jar. Moving it
+        # through the API needs no checkout. Tags moved with GITHUB_TOKEN don't trigger workflows,
+        # and release.yml only listens for v* anyway.
         run: |
-          git tag -f nightly-build
-          git push -f origin refs/tags/nightly-build
+          gh api -X PATCH "repos/${GH_REPO}/git/refs/tags/nightly-build" -f sha="${GITHUB_SHA}" -F force=true
           gh release upload nightly-build dist/mcsrc-mcp.jar dist/mcsrc-mcp.bat --clobber
           gh release edit nightly-build --prerelease --notes "Built from ${GITHUB_SHA} on $(date -u +%Y-%m-%d)."
