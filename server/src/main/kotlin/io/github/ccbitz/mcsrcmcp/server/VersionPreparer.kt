@@ -97,7 +97,7 @@ class VersionPreparer(
             cache.put(request.workspaceId, workspace)
             ensureIndexStarted(workspace)
             if (request.build == null && request.variant != Variants.VANILLA) {
-                rotateLatest(request, version.id, workspace)
+                rotateLatest(request, version.id)
             }
             return PrepareVersionResult.Ready(request.workspaceId)
         } finally {
@@ -167,17 +167,15 @@ class VersionPreparer(
      * state. Pinned builds (an explicit id/build argument) never write the marker and never get
      * rotated out: the caller asked for that exact build.
      *
-     * The shared, content-keyed decompile cache ([sharedSourceCacheDir]) is deliberately kept: it
-     * is what makes the next build cheap. This sweeps it down to the keys that the new build, or
-     * any other warm build sharing the directory, can still hit, so entries orphaned by older builds
-     * don't accumulate either. A pinned build that has gone cold loses its entries in the sweep and
-     * re-decompiles on demand - a cost, never a wrong answer, since entries are content-keyed.
+     * The shared, content-keyed decompile pool ([SourcePools]) is deliberately kept: it is what
+     * makes the next build cheap. It is swept down to the keys some build still on disk recorded -
+     * the new one, and any pinned build - so entries only the rotated-out build could hit go with it.
      *
      * Housekeeping only: by the time this runs the workspace is built and cached, so a filesystem
      * error here (Windows refusing to delete a file a reader holds open, say) is logged rather
      * than turned into a failed prepare.
      */
-    private fun rotateLatest(request: WorkspaceRequest, mcVersion: String, workspace: VersionWorkspace) {
+    private fun rotateLatest(request: WorkspaceRequest, mcVersion: String) {
         val root = cacheRoot ?: return
         try {
             val variantDir = root.resolve("derived").resolve(request.variant)
@@ -189,7 +187,7 @@ class VersionPreparer(
                 CacheEviction.evictVersion(root, previous)
             }
 
-            workspace.sourceCacheDir?.let { sweepSharedSourceCache(it, workspace) }
+            CacheEviction.sweepSourcePools(root)
 
             Files.createDirectories(variantDir)
             val tmp = Files.createTempFile(variantDir, "latest-", ".tmp")
@@ -201,33 +199,6 @@ class VersionPreparer(
             }
         } catch (e: Exception) {
             System.err.println("mcsrc-mcp: latest-build cleanup for ${request.workspaceId} failed: $e")
-        }
-    }
-
-    private fun sweepSharedSourceCache(sourceCacheDir: Path, workspace: VersionWorkspace) {
-        if (!Files.isDirectory(sourceCacheDir)) return
-
-        // Only outer classes get their own entries - inner classes are decompiled into them.
-        fun keysOf(ws: VersionWorkspace): Sequence<String> =
-            ws.remappedClasses.keys.asSequence()
-                .filter { '$' !in it }
-                .mapNotNull { runCatching { DecompileService.sourceCacheKey(ws.remappedClasses, it) }.getOrNull() }
-
-        val sharing = cache.warmVersions().mapNotNull { cache.get(it) }
-            .filter { it !== workspace && it.sourceCacheDir == sourceCacheDir }
-        val keep = (sequenceOf(workspace) + sharing).flatMap { keysOf(it) }.toHashSet()
-
-        Files.newDirectoryStream(sourceCacheDir).use { entries ->
-            for (entry in entries) {
-                val name = entry.fileName.toString()
-                val stem = when {
-                    name.endsWith(".tokens.json") -> name.removeSuffix(".tokens.json")
-                    name.endsWith(".java") -> name.removeSuffix(".java")
-                    // Anything else is not an entry - an in-flight write's temp file above all.
-                    else -> continue
-                }
-                if (stem !in keep) Files.deleteIfExists(entry)
-            }
         }
     }
 

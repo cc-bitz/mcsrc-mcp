@@ -23,6 +23,7 @@ class VanillaWorkspaceBuilder(
         val derivedDir = cacheRoot?.let {
             DerivedCacheStore.directoryFor(it, request.workspaceId, detail.downloads.client.sha1, detail.downloads.clientMappings?.sha1)
         }
+        val sourceCacheDir = cacheRoot?.let { SourcePools.dir(it, variant, version.id) }
 
         // The derived cache is consulted FIRST. It used to be read only after unconditionally
         // reading every raw class out of the client jar and running a declarations-only index over
@@ -32,6 +33,7 @@ class VanillaWorkspaceBuilder(
         // them) that work produced a null remapper, so it was pure waste on both paths.
         val cached = derivedDir?.let { DerivedCacheStore.load(it) }
         if (cached != null) {
+            SourcePools.writeKeys(derivedDir, cached.remappedClasses)
             val loadedIndexer = Indexer()
             loadedIndexer.loadReferences(cached.references.mapValues { it.value.toSet() })
             return VersionWorkspace(
@@ -45,7 +47,7 @@ class VanillaWorkspaceBuilder(
                 ZipFile(clientJarPath.toFile()).use { WorkspaceIndexing.readAssets(it) },
                 JarAssetSource(clientJarPath),
                 derivedDir,
-                sourceCacheDir = defaultSourceCacheDir(derivedDir),
+                sourceCacheDir,
             )
         }
 
@@ -92,6 +94,7 @@ class VanillaWorkspaceBuilder(
         val indexData = finalIndexer.data()
         if (derivedDir != null) {
             DerivedCacheStore.save(derivedDir, remappedClasses, indexData, finalIndexer.allReferences().mapValues { it.value.toList() })
+            SourcePools.writeKeys(derivedDir, remappedClasses)
         }
 
         return VersionWorkspace(
@@ -103,12 +106,9 @@ class VanillaWorkspaceBuilder(
             assets,
             JarAssetSource(clientJarPath),
             derivedDir,
-            sourceCacheDir = defaultSourceCacheDir(derivedDir),
+            sourceCacheDir,
         )
     }
-
-    fun defaultSourceCacheDir(derivedDir: Path?): Path? =
-        derivedDir?.resolve("source")?.resolve(SOURCE_CACHE_CONFIG_VERSION)
 
     private suspend fun fetchBlobPath(url: String, sha1: String): Path {
         blobStore.pathIfPresent(sha1)?.let { return it }

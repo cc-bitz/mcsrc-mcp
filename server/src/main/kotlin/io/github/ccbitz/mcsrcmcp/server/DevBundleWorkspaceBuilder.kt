@@ -12,15 +12,6 @@ import java.util.zip.ZipInputStream
 class VariantSetupException(message: String) : IllegalStateException(message)
 
 /**
- * The shared, content-keyed decompile cache for one fork's builds of one Minecraft version. It
- * lives outside every per-build directory so a new build of the same Minecraft version hits it for
- * each class its patches didn't touch; latest-build rotation sweeps it, and cache eviction drops
- * it once no build of that version is left on disk.
- */
-fun sharedSourceCacheDir(cacheRoot: Path, variant: String, mcVersion: String): Path =
-    cacheRoot.resolve("derived").resolve(variant).resolve(mcVersion).resolve("source-cache").resolve(SOURCE_CACHE_CONFIG_VERSION)
-
-/**
  * Builds a fork's workspace from the artifacts every paperweight fork (Paper, Folia, Purpur)
  * already publishes:
  *
@@ -31,7 +22,8 @@ fun sharedSourceCacheDir(cacheRoot: Path, variant: String, mcVersion: String): P
  *
  * The heavy derived outputs (class jar, index) land in a per-build directory keyed by the server
  * jar hash and the bundle's zip URL, so a warm build is found without downloading the ~26MB bundle
- * at all; the per-class decompile cache is [sharedSourceCacheDir], shared across builds.
+ * at all; the per-class decompile cache is the fork's [SourcePools] pool for the Minecraft version,
+ * shared across builds.
  */
 class DevBundleWorkspaceBuilder(
     override val variant: String,
@@ -44,12 +36,13 @@ class DevBundleWorkspaceBuilder(
         val serverArtifact = detail.downloads.server
             ?: throw VariantSetupException("Mojang published no server jar for ${version.id}, so $variant sources cannot be built")
         val bundle = request.bundle ?: devBundles.resolve(version.id, request.build)
-        val sourceCacheDir = cacheRoot?.let { sharedSourceCacheDir(it, variant, version.id) }
+        val sourceCacheDir = cacheRoot?.let { SourcePools.dir(it, variant, version.id) }
 
         // The server jar's hash pins the Minecraft version and the zip URL pins the build (a
         // snapshot's URL carries its publish timestamp), which is everything the output depends on.
         val derivedDir = cacheRoot?.let { DerivedCacheStore.directoryFor(it, request.workspaceId, serverArtifact.sha1, sha1Hex(bundle.zipUrl.toByteArray())) }
         derivedDir?.let { DerivedCacheStore.load(it) }?.let { cached ->
+            SourcePools.writeKeys(derivedDir, cached.remappedClasses)
             return VersionWorkspace(
                 request.workspaceId,
                 cached.indexData,
@@ -99,6 +92,7 @@ class DevBundleWorkspaceBuilder(
         val indexData = indexer.data()
         if (derivedDir != null) {
             DerivedCacheStore.save(derivedDir, classesByName, indexData, indexer.allReferences().mapValues { it.value.toList() })
+            SourcePools.writeKeys(derivedDir, classesByName)
         }
 
         return VersionWorkspace(

@@ -114,7 +114,7 @@ class CacheEvictionTest {
     fun `a fork's shared source cache is never treated as a unit`(@TempDir cacheRoot: Path) {
         val now = Instant.now()
         makeDerivedDir(cacheRoot, "paper/26.3.build.49", "v2-cccc-dddd", now)
-        val sourceCache = sharedSourceCacheDir(cacheRoot, Variants.PAPER, "26.3")
+        val sourceCache = SourcePools.dir(cacheRoot, Variants.PAPER, "26.3")
         Files.createDirectories(sourceCache)
         val decoy = sourceCache.resolve("index.bin")
         Files.writeString(decoy, "{}")
@@ -123,6 +123,121 @@ class CacheEvictionTest {
         CacheEviction.evictStale(cacheRoot, Duration.ofDays(30), now)
 
         assertTrue(Files.exists(decoy))
+    }
+
+    private fun writeKeys(unitDir: Path, vararg keys: String) {
+        Files.writeString(unitDir.resolve(SourcePools.KEYS_FILE), keys.joinToString("\n"))
+    }
+
+    private fun writeEntry(pool: Path, key: String) {
+        Files.createDirectories(pool)
+        Files.writeString(pool.resolve("$key.java"), "class X {}")
+        Files.writeString(pool.resolve("$key.tokens.json"), "[]")
+    }
+
+    // A class that changed in a later version leaves its old entry behind; once no version still
+    // on disk lists that entry's key, it goes.
+    @Test
+    fun `pool entries no surviving unit lists are swept, shared ones kept`(@TempDir cacheRoot: Path) {
+        val now = Instant.now()
+        val rc = makeDerivedDir(cacheRoot, "26.3-rc-3", "2-aaaa-none", now.minus(Duration.ofDays(60)))
+        val release = makeDerivedDir(cacheRoot, "26.3", "2-bbbb-none", now)
+        writeKeys(rc, "a".repeat(40), "b".repeat(40))
+        writeKeys(release, "b".repeat(40))
+        val pool = SourcePools.dir(cacheRoot, Variants.VANILLA, "26.3")
+        writeEntry(pool, "a".repeat(40))
+        writeEntry(pool, "b".repeat(40))
+        writeEntry(pool, "c".repeat(40))
+        Files.writeString(pool.resolve("src-123.tmp"), "in-flight write")
+
+        CacheEviction.evictStale(cacheRoot, Duration.ofDays(30), now)
+
+        assertFalse(Files.exists(rc))
+        assertFalse(Files.exists(pool.resolve("a".repeat(40) + ".java")), "only the evicted rc used this entry")
+        assertFalse(Files.exists(pool.resolve("a".repeat(40) + ".tokens.json")))
+        assertFalse(Files.exists(pool.resolve("c".repeat(40) + ".java")), "no unit used this entry")
+        assertTrue(Files.exists(pool.resolve("b".repeat(40) + ".java")))
+        assertTrue(Files.exists(pool.resolve("b".repeat(40) + ".tokens.json")))
+        assertTrue(Files.exists(pool.resolve("src-123.tmp")), "in-flight writes are not the sweep's to delete")
+    }
+
+    @Test
+    fun `a pool is left unswept while one of its units has no key list`(@TempDir cacheRoot: Path) {
+        val now = Instant.now()
+        makeDerivedDir(cacheRoot, "26.3", "2-bbbb-none", now)
+        val pool = SourcePools.dir(cacheRoot, Variants.VANILLA, "26.3")
+        writeEntry(pool, "c".repeat(40))
+
+        CacheEviction.evictStale(cacheRoot, Duration.ofDays(30), now)
+
+        assertTrue(Files.exists(pool.resolve("c".repeat(40) + ".java")))
+    }
+
+    @Test
+    fun `a vanilla pool goes with the last version of its train`(@TempDir cacheRoot: Path) {
+        val now = Instant.now()
+        makeDerivedDir(cacheRoot, "26.2", "2-aaaa-none", now)
+        writeEntry(SourcePools.dir(cacheRoot, Variants.VANILLA, "26.3"), "a".repeat(40))
+        writeEntry(SourcePools.dir(cacheRoot, Variants.VANILLA, "26.2"), "b".repeat(40))
+
+        CacheEviction.evictStale(cacheRoot, Duration.ofDays(30), now)
+
+        assertFalse(Files.exists(cacheRoot.resolve("derived").resolve("vanilla").resolve("26.3")))
+        assertTrue(Files.exists(cacheRoot.resolve("derived").resolve("vanilla").resolve("26.2")))
+    }
+
+    @Test
+    fun `leftover per-unit sources and stale config versions are removed`(@TempDir cacheRoot: Path) {
+        val now = Instant.now()
+        val unit = makeDerivedDir(cacheRoot, "26.3", "2-bbbb-none", now)
+        val staleConfig = cacheRoot.resolve("derived").resolve("vanilla").resolve("26.3").resolve("source-cache").resolve("v1")
+        Files.createDirectories(staleConfig)
+        Files.writeString(staleConfig.resolve("net.minecraft.Foo.java"), "old")
+        writeEntry(SourcePools.dir(cacheRoot, Variants.VANILLA, "26.3"), "b".repeat(40))
+
+        CacheEviction.evictStale(cacheRoot, Duration.ofDays(30), now)
+
+        assertTrue(Files.exists(unit.resolve("index.bin")))
+        assertFalse(Files.exists(unit.resolve("source")), "sources live in the pool now")
+        assertFalse(Files.exists(staleConfig))
+        assertTrue(Files.exists(SourcePools.dir(cacheRoot, Variants.VANILLA, "26.3").resolve("b".repeat(40) + ".java")))
+    }
+
+    @Test
+    fun `superseded snapshots get the short ttl, releases the normal one`(@TempDir cacheRoot: Path) {
+        val now = Instant.now()
+        val snapshot = makeDerivedDir(cacheRoot, "26.3-rc-2", "2-aaaa-none", now.minus(Duration.ofDays(10)))
+        val current = makeDerivedDir(cacheRoot, "26.4-snapshot-1", "2-cccc-none", now.minus(Duration.ofDays(10)))
+        val release = makeDerivedDir(cacheRoot, "26.2", "2-bbbb-none", now.minus(Duration.ofDays(10)))
+
+        CacheEviction.evictStale(cacheRoot, Duration.ofDays(30), now, Duration.ofDays(7), supersededSnapshots = setOf("26.3-rc-2"))
+
+        assertFalse(Files.exists(snapshot))
+        assertTrue(Files.exists(current), "the newest snapshot isn't superseded")
+        assertTrue(Files.exists(release))
+    }
+
+    // The pools hold every decompiled class; leaving them out of the budget would let the cache
+    // overrun it by a pool per train. Evicting a unit also shrinks its pool by what only it used.
+    @Test
+    fun `evictOverBudget counts pools and shrinks them with their units`(@TempDir cacheRoot: Path) {
+        val now = Instant.now()
+        val old = makeDerivedDir(cacheRoot, "26.3-rc-3", "2-aaaa-none", now.minus(Duration.ofDays(5)))
+        val recent = makeDerivedDir(cacheRoot, "26.3", "2-bbbb-none", now)
+        writeKeys(old, "a".repeat(40))
+        writeKeys(recent, "b".repeat(40))
+        val pool = SourcePools.dir(cacheRoot, Variants.VANILLA, "26.3")
+        writeEntry(pool, "a".repeat(40))
+        Files.writeString(pool.resolve("a".repeat(40) + ".java"), "x".repeat(3000))
+        writeEntry(pool, "b".repeat(40))
+
+        // Units alone fit; only the pool's big entry pushes the total over.
+        CacheEviction.evictOverBudget(cacheRoot, 2000)
+
+        assertFalse(Files.exists(old))
+        assertFalse(Files.exists(pool.resolve("a".repeat(40) + ".java")))
+        assertTrue(Files.exists(recent))
+        assertTrue(Files.exists(pool.resolve("b".repeat(40) + ".java")))
     }
 
     @Test
@@ -214,7 +329,7 @@ class CacheEvictionTest {
     // full of entries, so a plain delete would throw DirectoryNotEmptyException.
     @Test
     fun `evictVersion removes a fork's populated shared source cache`(@TempDir cacheRoot: Path) {
-        val sourceCache = sharedSourceCacheDir(cacheRoot, Variants.PAPER, "26.3")
+        val sourceCache = SourcePools.dir(cacheRoot, Variants.PAPER, "26.3")
         Files.createDirectories(sourceCache)
         Files.writeString(sourceCache.resolve("a".repeat(40) + ".java"), "class Foo {}")
 

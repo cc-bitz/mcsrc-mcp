@@ -512,19 +512,35 @@ fun buildServer(
 ): Server {
     val blobStore = BlobStore(cacheRoot.resolve("blobs"))
     val workspaceCache = WorkspaceCache()
+    val metadata = VersionMetadataCache(fetcher, cacheRoot)
 
     // Housekeeping, off the startup path: nothing the server answers depends on it having
     // finished, and sizing the cache for the budget pass reads every file in every unit. Units
     // already warm are spared, and a filesystem error (Windows refusing to delete a file a tool
     // call holds open) is logged rather than taking the server down.
     scope.launch(Dispatchers.IO) {
+        // Offline with no manifest on disk, nothing is known to be superseded, so snapshots just
+        // keep the normal TTL this run.
+        val superseded = try {
+            supersededSnapshots(metadata.manifest().versions)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            emptySet()
+        }
         try {
-            CacheEviction.evict(cacheRoot, resolveCacheTtl(), resolveCacheMaxSizeBytes(), workspaceCache.warmVersions().toSet())
+            CacheEviction.evict(
+                cacheRoot,
+                resolveCacheTtl(),
+                resolveCacheMaxSizeBytes(),
+                workspaceCache.warmVersions().toSet(),
+                snapshotTtl = resolveSnapshotTtl(),
+                supersededSnapshots = superseded,
+            )
         } catch (e: Exception) {
             System.err.println("mcsrc-mcp: cache eviction failed: $e")
         }
     }
-    val metadata = VersionMetadataCache(fetcher, cacheRoot)
     // One dev-bundle repository (and one builder) per registered fork - the registry is the
     // single source of truth, so a new fork is a Variant entry and nothing else.
     val devBundleRepos = Variants.ALL
@@ -801,13 +817,12 @@ private fun Server.registerTools(
 
             versionPreparer.clear(workspaceId)
             CacheEviction.evictVersion(cacheRoot, workspaceId)
-            // A fork's shared decompile cache lives outside its per-build directories, so the
-            // per-workspace eviction above leaves it - clear it too. derived/<fork>/<mcVersion>
-            // holds nothing but that cache (see sharedSourceCacheDir), and it is never empty by
-            // now, so it goes recursively like any other derived directory.
-            if (request.variant != Variants.VANILLA) {
-                CacheEviction.evictVersion(cacheRoot, "${request.variant}/${version.id}")
-            } else {
+            // The shared decompile pool lives outside every workspace's directory, so the eviction
+            // above leaves it - clear it too, or the version would still answer from it. That
+            // costs the pool's other workspaces (the rest of a vanilla release train, the fork's
+            // other builds) a re-decompile, never a wrong answer.
+            CacheEviction.evictVersion(cacheRoot, "${request.variant}/${SourcePools.poolKey(request.variant, version.id)}")
+            if (request.variant == Variants.VANILLA) {
                 // Reports and game data only ever exist for vanilla workspaces - they are generated
                 // from the client jar, which a variant workspace doesn't hold.
                 reportGenerator.clear(version.id)

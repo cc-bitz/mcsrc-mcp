@@ -141,6 +141,13 @@ class PaperWorkspaceBuilderTest {
                 .resolve("source-cache").resolve(SOURCE_CACHE_CONFIG_VERSION),
             workspace.sourceCacheDir,
         )
+        // The pool sweep can only drop entries once every build using the pool says what it uses.
+        val outerClasses = workspace.remappedClasses.keys.filter { '$' !in it }
+        assertEquals(
+            outerClasses.map { DecompileService.sourceCacheKey(workspace.remappedClasses, it) }.toSet(),
+            SourcePools.readKeys(derivedDir),
+        )
+        assertTrue("org/bukkit/craftbukkit/Added" in outerClasses)
 
         // A second build reloads the index from the derived cache with zero fetches: the derived
         // directory is keyed by the server jar's sha1 and the bundle zip's URL, so a warm hit is

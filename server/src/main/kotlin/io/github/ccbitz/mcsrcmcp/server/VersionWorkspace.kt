@@ -87,10 +87,10 @@ class VersionWorkspace(
     val assetSource: AssetSource,
     val cacheDir: Path?,
     /**
-     * Where per-class decompiled sources (+ tokens) are cached. Vanilla keeps this inside its
-     * derived directory; variant builders may point it at a directory shared across builds of the
-     * same Minecraft version, because the cache is keyed by class content (see DecompileService) -
-     * unchanged classes reuse their decompiles across builds. Null disables caching.
+     * Where per-class decompiled sources (+ tokens) are cached: the workspace's [SourcePools] pool,
+     * shared with its vanilla release train or its fork's other builds of the same Minecraft
+     * version. The cache is keyed by class content (see DecompileService), so unchanged classes
+     * reuse their decompiles across workspaces. Null disables caching.
      */
     val sourceCacheDir: Path? = null,
 )
