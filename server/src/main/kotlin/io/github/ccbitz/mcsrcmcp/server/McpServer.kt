@@ -86,7 +86,7 @@ classes param. search_code is literal text/regex on decompiled source; find_refe
 bytecode (CHECKCAST, INVOKE*, field refs), so it catches references that never spell the simple
 name - super(...), inherited/overridden methods, lambda/method-ref bodies. Empty search_code
 output in a class find_references named proves nothing - get_class_source it and read around the
-reported callerMember.
+reported members.
 
 Navigating known code: get_class_outline for a class's members (no decompile), find_references
 for "where is X used/called" - even within its own declaring class. get_class_source only to
@@ -1037,8 +1037,10 @@ private fun Server.registerTools(
             "resolved up the inheritance chain (unless resolve_declaration=false). An ambiguous " +
             "member (overloads, covariant bridges, a field and method sharing a name) returns a " +
             "candidate list rather than an error - call again with one candidate, exactly as " +
-            "listed, as member. Declaring and caller classes carry size/nMethods/nFields, so you " +
-            "can judge what's worth reading.",
+            "listed, as member. Results are grouped by caller class, which carries " +
+            "size/nMethods/nFields so you can judge what's worth reading. Paged: 'total' is exact, " +
+            "and a truncated page names the 'nextOffset' to pass as offset for the next one - or " +
+            "narrow a hub's hundreds of callers in one call with 'exclude'.",
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
@@ -1052,6 +1054,13 @@ private fun Server.registerTools(
                 )
                 stringProp("kind", "'method' or 'field', if a name is both")
                 boolProp("resolve_declaration", "Resolve up the inheritance chain (default true)")
+                limitProp(100)
+                intProp("offset", "References to skip, e.g. a previous page's nextOffset (default 0)")
+                stringProp(
+                    "exclude",
+                    "Regex: drop references whose 'callerClass#member' matches it, like piping through 'rg -v'. " +
+                        "e.g. 'CraftPlayer#' to shed a class's calls to itself",
+                )
             },
             required = listOf("version", "class"),
         ),
@@ -1063,6 +1072,9 @@ private fun Server.registerTools(
         val member = request.arguments?.get("member")?.jsonPrimitive?.content
         val kind = request.arguments?.get("kind")?.jsonPrimitive?.content
         val resolveDeclaration = request.arguments?.get("resolve_declaration")?.jsonPrimitive?.content?.toBoolean() ?: true
+        val limit = request.arguments?.get("limit")?.jsonPrimitive?.intOrNull ?: 100
+        val offset = request.arguments?.get("offset")?.jsonPrimitive?.intOrNull ?: 0
+        val exclude = request.arguments?.get("exclude")?.jsonPrimitive?.content
 
         when (val resolved = resolver.resolve(versionQuery, request.variantArg()) { percent ->
             sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
@@ -1077,6 +1089,9 @@ private fun Server.registerTools(
                     kind,
                     resolveDeclaration,
                     resolved.workspace.remappedClasses,
+                    limit.coerceAtLeast(1),
+                    offset.coerceAtLeast(0),
+                    exclude,
                 )
                 when (outcome) {
                     is FindReferencesOutcome.Found -> CallToolResult(content = listOf(TextContent(Json.encodeToString(outcome.result))))
@@ -1088,6 +1103,8 @@ private fun Server.registerTools(
                 CallToolResult(content = listOf(TextContent(e.message ?: "class not found")), isError = true)
             } catch (e: MemberNotFoundException) {
                 CallToolResult(content = listOf(TextContent(e.message ?: "member not found")), isError = true)
+            } catch (e: PatternSyntaxException) {
+                CallToolResult(content = listOf(TextContent(invalidRegexMessage(e))), isError = true)
             }
         }
     }

@@ -76,10 +76,10 @@ class FindReferencesToolTest {
 
         val result = (outcome as FindReferencesOutcome.Found).result
         assertEquals("go(I)V", result.targetMember)
-        assertEquals(listOf("net.minecraft.Caller"), result.references.map { it.callerClass })
+        assertEquals(listOf("net.minecraft.Caller"), result.results.map { it.callerClass })
 
         val other = findReferencesToolLogic(indexer.data(), indexer, "net.minecraft.Over", memberName = "go()V")
-        assertTrue((other as FindReferencesOutcome.Found).result.references.isEmpty())
+        assertTrue((other as FindReferencesOutcome.Found).result.results.isEmpty())
     }
 
     @Test
@@ -97,7 +97,7 @@ class FindReferencesToolTest {
 
         val result = (outcome as FindReferencesOutcome.Found).result
         assertEquals("net.minecraft.Over", result.declaringClass)
-        assertEquals(listOf("net.minecraft.Caller"), result.references.map { it.callerClass })
+        assertEquals(listOf("net.minecraft.Caller"), result.results.map { it.callerClass })
     }
 
     @Test
@@ -134,7 +134,7 @@ class FindReferencesToolTest {
         val result = (outcome as FindReferencesOutcome.Found).result
         assertEquals("staticSound()V", result.targetMember)
         assertEquals("net.minecraft.Animal", result.declaringClass)
-        assertTrue(result.references.any { it.callerClass == "net.minecraft.Dog" && it.callerMember == "run()V" })
+        assertTrue(result.results.any { it.callerClass == "net.minecraft.Dog" && "run()V" in it.members })
     }
 
     @Test
@@ -195,7 +195,7 @@ class FindReferencesToolTest {
         )
 
         val result = (outcome as FindReferencesOutcome.Found).result
-        val dogRef = result.references.first { it.callerClass == "net.minecraft.Dog" }
+        val dogRef = result.results.first { it.callerClass == "net.minecraft.Dog" }
         val expectedMembers = indexer.data().members()["net/minecraft/Dog"]!!
         assertEquals(dogBytes.size, dogRef.size)
         assertEquals(expectedMembers.methods().size, dogRef.nMethods)
@@ -210,7 +210,96 @@ class FindReferencesToolTest {
 
         val result = (outcome as FindReferencesOutcome.Found).result
         assertEquals(0, result.declaringClassSize)
-        assertTrue(result.references.all { it.size == 0 })
+        assertTrue(result.results.all { it.size == 0 })
+    }
+
+    // net/minecraft/Target.t()V, called from a()V and b()V in each of Caller0..Caller4: ten
+    // references over five classes - enough to page through and to split a class across pages.
+    private fun pagingIndexer(): Indexer {
+        fun classOf(name: String, body: (org.objectweb.asm.ClassWriter) -> Unit): ByteArray {
+            val writer = org.objectweb.asm.ClassWriter(org.objectweb.asm.ClassWriter.COMPUTE_MAXS)
+            writer.visit(org.objectweb.asm.Opcodes.V17, org.objectweb.asm.Opcodes.ACC_PUBLIC, name, null, "java/lang/Object", null)
+            body(writer)
+            writer.visitEnd()
+            return writer.toByteArray()
+        }
+
+        fun method(writer: org.objectweb.asm.ClassWriter, name: String, callsTarget: Boolean) {
+            val mv = writer.visitMethod(org.objectweb.asm.Opcodes.ACC_PUBLIC or org.objectweb.asm.Opcodes.ACC_STATIC, name, "()V", null, null)
+            mv.visitCode()
+            if (callsTarget) mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, "net/minecraft/Target", "t", "()V", false)
+            mv.visitInsn(org.objectweb.asm.Opcodes.RETURN)
+            mv.visitMaxs(0, 0)
+            mv.visitEnd()
+        }
+
+        val indexer = Indexer()
+        indexer.index(classOf("net/minecraft/Target") { method(it, "t", callsTarget = false) })
+        for (i in 0 until 5) {
+            indexer.index(classOf("net/minecraft/Caller$i") { writer ->
+                method(writer, "a", callsTarget = true)
+                method(writer, "b", callsTarget = true)
+            })
+        }
+        return indexer
+    }
+
+    private fun page(indexer: Indexer, limit: Int, offset: Int = 0, exclude: String? = null): FindReferencesResult =
+        (findReferencesToolLogic(indexer.data(), indexer, "net.minecraft.Target", "t", limit = limit, offset = offset, exclude = exclude)
+            as FindReferencesOutcome.Found).result
+
+    private fun FindReferencesResult.flat(): List<String> = results.flatMap { hits -> hits.members.map { "${hits.callerClass}#$it" } }
+
+    @Test
+    fun `a page states what it shows, the exact total and where the next one starts`() {
+        val first = page(pagingIndexer(), limit = 3)
+
+        assertEquals(3, first.shown)
+        assertEquals(10, first.total)
+        assertTrue(first.truncated)
+        assertEquals(3, first.nextOffset)
+        // Sorted, and grouped by caller class so each class's stats appear once.
+        assertEquals(listOf("net.minecraft.Caller0#a()V", "net.minecraft.Caller0#b()V", "net.minecraft.Caller1#a()V"), first.flat())
+        assertEquals(listOf("net.minecraft.Caller0", "net.minecraft.Caller1"), first.results.map { it.callerClass })
+    }
+
+    @Test
+    fun `following nextOffset visits every reference exactly once`() {
+        val indexer = pagingIndexer()
+        val seen = mutableListOf<String>()
+        var offset: Int? = 0
+        while (offset != null) {
+            val result = page(indexer, limit = 3, offset = offset)
+            seen += result.flat()
+            offset = result.nextOffset
+        }
+
+        assertEquals(page(indexer, limit = 100).flat(), seen)
+        assertEquals(10, seen.size)
+    }
+
+    @Test
+    fun `the last page is not truncated`() {
+        val last = page(pagingIndexer(), limit = 3, offset = 9)
+
+        assertEquals(1, last.shown)
+        assertFalse(last.truncated)
+        assertNull(last.nextOffset)
+    }
+
+    // Like search_code's exclude: the filter sees the caller class and member, and the total counts
+    // only what survives it, so paging a filtered view is consistent.
+    @Test
+    fun `exclude drops references by caller class or member before counting`() {
+        val indexer = pagingIndexer()
+
+        val noCallers03 = page(indexer, limit = 100, exclude = "Caller[03]")
+        assertEquals(6, noCallers03.total)
+        assertTrue(noCallers03.results.none { it.callerClass.endsWith("Caller0") || it.callerClass.endsWith("Caller3") })
+
+        val onlyA = page(indexer, limit = 100, exclude = "#b\\(")
+        assertEquals(5, onlyA.total)
+        assertTrue(onlyA.results.all { it.members == listOf("a()V") })
     }
 
     @Test

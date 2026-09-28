@@ -4,15 +4,21 @@ import io.github.ccbitz.mcsrcmcp.core.IndexData
 import io.github.ccbitz.mcsrcmcp.core.Indexer
 import kotlinx.serialization.Serializable
 
+/**
+ * One caller class and every member of it that references the target. References used to be a flat
+ * list, each repeating its caller's name and stats - on a hub like CraftPlayer.getHandle(), whose
+ * callers are mostly CraftPlayer itself, that framing was most of the payload. Same fix as
+ * search_code's per-class grouping.
+ */
 @Serializable
-data class ReferenceEntry(
+data class CallerHits(
     val callerClass: String,
-    val callerMember: String,
     // The caller's own bytecode size/member counts - context for deciding whether to read the
     // whole caller class before diving in. Zero when remappedClasses wasn't supplied.
     val size: Int,
     val nMethods: Int,
     val nFields: Int,
+    val members: List<String>,
 )
 
 @Serializable
@@ -23,8 +29,28 @@ data class FindReferencesResult(
     val declaringClassSize: Int,
     val declaringClassNMethods: Int,
     val declaringClassNFields: Int,
-    val references: List<ReferenceEntry>,
+    val results: List<CallerHits>,
+    val shown: Int,
+    // Always exact, unlike search_code's "40+": references are a complete set already in memory,
+    // so counting all of them costs nothing - and it is what makes offset paging possible.
+    val total: Int,
+    val truncated: Boolean,
+    // Where the next page starts; null on the last one.
+    val nextOffset: Int?,
 )
+
+/**
+ * Which slice of the references to return: [limit] of them from [offset], in (caller class,
+ * member) order, after dropping any whose "callerClass#member" matches [exclude] - the same
+ * always-a-regex `rg -v` search_code's exclude is.
+ */
+internal class ReferencePaging(val limit: Int = 100, val offset: Int = 0, exclude: String? = null) {
+
+    private val exclude = exclude?.takeIf { it.isNotEmpty() }?.let { LineMatcher.of(it, useRegex = true) }
+
+    fun excludes(callerClass: String, member: String): Boolean = exclude?.matches("$callerClass#$member") == true
+
+}
 
 sealed interface FindReferencesOutcome {
     data class Found(val result: FindReferencesResult) : FindReferencesOutcome
@@ -42,31 +68,25 @@ fun findReferencesToolLogic(
     kind: String? = null,
     resolveDeclaration: Boolean = true,
     remappedClasses: Map<String, ByteArray> = emptyMap(),
+    limit: Int = 100,
+    offset: Int = 0,
+    exclude: String? = null,
 ): FindReferencesOutcome {
     val internalName = dottedClassName.replace('.', '/')
     if (internalName !in indexData.classes()) {
         throw ClassNotFoundInIndexException(dottedClassName)
     }
+    val paging = ReferencePaging(limit, offset, exclude)
 
     if (memberName == null) {
-        val refs = referenceIndexer.references(internalName)
-        val (size, nMethods, nFields) = classStats(indexData, remappedClasses, internalName)
         return FindReferencesOutcome.Found(
-            FindReferencesResult(
-                targetClass = dottedClassName,
-                targetMember = null,
-                declaringClass = dottedClassName,
-                declaringClassSize = size,
-                declaringClassNMethods = nMethods,
-                declaringClassNFields = nFields,
-                references = refs.map { parseReferenceEntry(it, indexData, remappedClasses) },
-            ),
+            resultOf(indexData, remappedClasses, dottedClassName, null, internalName, referenceIndexer.references(internalName), paging),
         )
     }
 
     when (val resolved = resolveMember(indexData, internalName, memberName, kind)) {
         is MemberResolution.Ambiguous -> return FindReferencesOutcome.AmbiguousMember(resolved.candidates)
-        is MemberResolution.Found -> return foundReferences(indexData, referenceIndexer, dottedClassName, internalName, resolved, remappedClasses)
+        is MemberResolution.Found -> return foundReferences(indexData, referenceIndexer, dottedClassName, internalName, resolved, remappedClasses, paging)
         MemberResolution.NotFound -> {
             if (!resolveDeclaration) {
                 throw MemberNotFoundException(dottedClassName, memberName)
@@ -75,7 +95,8 @@ fun findReferencesToolLogic(
             for (ancestor in ancestorsOf(indexData, internalName)) {
                 when (val ancestorResolved = resolveMember(indexData, ancestor, memberName, kind)) {
                     is MemberResolution.Ambiguous -> return FindReferencesOutcome.AmbiguousMember(ancestorResolved.candidates)
-                    is MemberResolution.Found -> return foundReferences(indexData, referenceIndexer, dottedClassName, ancestor, ancestorResolved, remappedClasses)
+                    is MemberResolution.Found ->
+                        return foundReferences(indexData, referenceIndexer, dottedClassName, ancestor, ancestorResolved, remappedClasses, paging)
                     MemberResolution.NotFound -> continue
                 }
             }
@@ -101,21 +122,58 @@ private fun foundReferences(
     declaringInternalName: String,
     resolved: MemberResolution.Found,
     remappedClasses: Map<String, ByteArray>,
+    paging: ReferencePaging,
 ): FindReferencesOutcome.Found {
     val key = "$declaringInternalName:${resolved.name}:${resolved.desc}"
-    val refs = referenceIndexer.references(key)
-    val (size, nMethods, nFields) = classStats(indexData, remappedClasses, declaringInternalName)
+    // The same shape the candidates are listed in, so it can be passed straight back.
+    val targetMember = if (resolved.isField) "${resolved.name}: ${resolved.desc}" else "${resolved.name}${resolved.desc}"
     return FindReferencesOutcome.Found(
-        FindReferencesResult(
-            targetClass = dottedTargetClass,
-            // The same shape the candidates are listed in, so it can be passed straight back.
-            targetMember = if (resolved.isField) "${resolved.name}: ${resolved.desc}" else "${resolved.name}${resolved.desc}",
-            declaringClass = declaringInternalName.replace('/', '.'),
-            declaringClassSize = size,
-            declaringClassNMethods = nMethods,
-            declaringClassNFields = nFields,
-            references = refs.map { parseReferenceEntry(it, indexData, remappedClasses) },
-        ),
+        resultOf(indexData, remappedClasses, dottedTargetClass, targetMember, declaringInternalName, referenceIndexer.references(key), paging),
+    )
+}
+
+// Reference values are "m:owner:name:desc" (method-body/signature-driven) or "f:owner:name:desc"
+// (a field declaration whose own type is the referenced class) - never assume method-only.
+private fun resultOf(
+    indexData: IndexData,
+    remappedClasses: Map<String, ByteArray>,
+    dottedTargetClass: String,
+    targetMember: String?,
+    declaringInternalName: String,
+    rawReferences: Set<String>,
+    paging: ReferencePaging,
+): FindReferencesResult {
+    class Ref(val ownerInternalName: String, val callerClass: String, val member: String)
+
+    // Sorted so a page means the same thing on every call; the set underneath has no order.
+    val refs = rawReferences
+        .map { raw ->
+            val parts = raw.substring(2).split(":", limit = 3)
+            val member = if (raw.startsWith("m:")) "${parts[1]}${parts[2]}" else "${parts[1]}: ${parts[2]}"
+            Ref(parts[0], parts[0].replace('/', '.'), member)
+        }
+        .filterNot { paging.excludes(it.callerClass, it.member) }
+        .sortedWith(compareBy({ it.callerClass }, { it.member }))
+
+    val page = refs.drop(paging.offset).take(paging.limit)
+    val end = paging.offset + page.size
+    val results = page.groupBy { it.ownerInternalName }.map { (ownerInternalName, members) ->
+        val (size, nMethods, nFields) = classStats(indexData, remappedClasses, ownerInternalName)
+        CallerHits(members.first().callerClass, size, nMethods, nFields, members.map { it.member })
+    }
+    val (size, nMethods, nFields) = classStats(indexData, remappedClasses, declaringInternalName)
+    return FindReferencesResult(
+        targetClass = dottedTargetClass,
+        targetMember = targetMember,
+        declaringClass = declaringInternalName.replace('/', '.'),
+        declaringClassSize = size,
+        declaringClassNMethods = nMethods,
+        declaringClassNFields = nFields,
+        results = results,
+        shown = page.size,
+        total = refs.size,
+        truncated = end < refs.size,
+        nextOffset = end.takeIf { it < refs.size },
     )
 }
 
@@ -166,15 +224,4 @@ private fun resolveMember(indexData: IndexData, internalName: String, memberName
             (methodCandidates.map { "${it.name()}${it.desc()}" } + fieldCandidates.map { "${it.name()}: ${it.desc()}" }).sorted(),
         )
     }
-}
-
-// Reference values are "m:owner:name:desc" (method-body/signature-driven) or "f:owner:name:desc"
-// (a field declaration whose own type is the referenced class) - never assume method-only.
-private fun parseReferenceEntry(raw: String, indexData: IndexData, remappedClasses: Map<String, ByteArray>): ReferenceEntry {
-    val isMethod = raw.startsWith("m:")
-    val parts = raw.substring(2).split(":", limit = 3)
-    val ownerInternalName = parts[0]
-    val member = if (isMethod) "${parts[1]}${parts[2]}" else "${parts[1]}: ${parts[2]}"
-    val (size, nMethods, nFields) = classStats(indexData, remappedClasses, ownerInternalName)
-    return ReferenceEntry(ownerInternalName.replace('/', '.'), member, size, nMethods, nFields)
 }

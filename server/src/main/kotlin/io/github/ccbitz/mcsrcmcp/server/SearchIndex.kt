@@ -247,7 +247,7 @@ class SearchIndex internal constructor(
 // A literal query used to be run as Regex(Regex.escape(query)) - a full regex engine to answer
 // "does this line contain this string", on every line of every class. String.contains does the
 // same job without the engine, and this runs a few million times per unscoped search.
-private sealed interface LineMatcher {
+internal sealed interface LineMatcher {
     fun matches(line: String): Boolean
 
     class Literal(private val needle: String) : LineMatcher {
