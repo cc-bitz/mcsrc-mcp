@@ -112,6 +112,41 @@ class IndexerTest {
         assertTrue(dogWorker.data().classes().isEmpty());
     }
 
+    // A class whose one method calls target.method()V - enough bytecode for a reference.
+    private static byte[] callerClass(String name, String target, String method) {
+        org.objectweb.asm.ClassWriter writer = new org.objectweb.asm.ClassWriter(org.objectweb.asm.ClassWriter.COMPUTE_MAXS);
+        writer.visit(org.objectweb.asm.Opcodes.V17, org.objectweb.asm.Opcodes.ACC_PUBLIC, name, null, "java/lang/Object", null);
+        org.objectweb.asm.MethodVisitor mv = writer.visitMethod(org.objectweb.asm.Opcodes.ACC_PUBLIC | org.objectweb.asm.Opcodes.ACC_STATIC, "call", "()V", null, null);
+        mv.visitCode();
+        mv.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, target, method, "()V", false);
+        mv.visitInsn(org.objectweb.asm.Opcodes.RETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+        writer.visitEnd();
+        return writer.toByteArray();
+    }
+
+    // A fork's own code lives outside net/minecraft - org/bukkit, io/papermc, org/purpurmc - so
+    // the default Mojang-only scope would drop every reference to it.
+    @Test
+    void scopedIndexerKeepsReferencesToEveryClassInScope() {
+        java.util.Set<String> jar = java.util.Set.of("org/bukkit/Caller", "org/bukkit/Target");
+        Indexer indexer = new Indexer(jar::contains);
+        indexer.index(callerClass("org/bukkit/Caller", "org/bukkit/Target", "run"));
+
+        assertTrue(indexer.references("org/bukkit/Target:run:()V").contains("m:org/bukkit/Caller:call:()V"));
+        // Targets outside the scope are still dropped - the JDK is referenced by every class.
+        assertTrue(indexer.allReferences().keySet().stream().noneMatch(key -> key.startsWith("java/")));
+    }
+
+    @Test
+    void defaultIndexerKeepsOnlyMojangReferences() {
+        Indexer indexer = new Indexer();
+        indexer.index(callerClass("org/bukkit/Caller", "org/bukkit/Target", "run"));
+
+        assertTrue(indexer.references("org/bukkit/Target:run:()V").isEmpty());
+    }
+
     @Test
     void loadReferencesClearsPreviousState() throws IOException {
         Indexer indexer = new Indexer();

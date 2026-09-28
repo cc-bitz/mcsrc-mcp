@@ -28,7 +28,7 @@ class PaperWorkspaceBuilderTest {
     private fun sha256Hex(bytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
-    private fun tinyClassBytes(internalName: String): ByteArray {
+    private fun tinyClassBytes(internalName: String, fieldType: String? = null): ByteArray {
         val writer = org.objectweb.asm.ClassWriter(0)
         writer.visit(
             org.objectweb.asm.Opcodes.V17,
@@ -38,6 +38,9 @@ class PaperWorkspaceBuilderTest {
             "java/lang/Object",
             null,
         )
+        if (fieldType != null) {
+            writer.visitField(org.objectweb.asm.Opcodes.ACC_PUBLIC, "ref", "L$fieldType;", null, null).visitEnd()
+        }
         writer.visitEnd()
         return writer.toByteArray()
     }
@@ -87,8 +90,10 @@ class PaperWorkspaceBuilderTest {
                 "${sha256Hex(vanillaNested)}\t1.99-test\t1.99-test/server-1.99-test.jar".toByteArray(),
             "META-INF/versions/1.99-test/server-1.99-test.jar" to vanillaNested,
         )
+        // Paper's patched vanilla class refers to a Paper-only one - a reference find_references
+        // has to be able to see, though its target is nowhere near net/minecraft.
         val paperJar = zipOf(
-            "net/minecraft/Old.class" to tinyClassBytes("net/minecraft/Old"),
+            "net/minecraft/Old.class" to tinyClassBytes("net/minecraft/Old", fieldType = "org/bukkit/craftbukkit/Added"),
             "org/bukkit/craftbukkit/Added.class" to tinyClassBytes("org/bukkit/craftbukkit/Added"),
         )
         val paperclip = paperclipJar(vanillaNested, paperJar)
@@ -128,6 +133,8 @@ class PaperWorkspaceBuilderTest {
         assertTrue(workspace.remappedClasses.containsKey("net/minecraft/Old"))
         assertTrue(workspace.remappedClasses.containsKey("org/bukkit/craftbukkit/Added"))
         assertTrue(workspace.indexData.classes().containsKey("org/bukkit/craftbukkit/Added"))
+        val addedRef = "f:net/minecraft/Old:ref:Lorg/bukkit/craftbukkit/Added;"
+        assertEquals(setOf(addedRef), workspace.referenceIndexer.references("org/bukkit/craftbukkit/Added"))
         // Paper ships no client assets, and nothing is left to remap.
         assertTrue(workspace.assets.isEmpty())
         assertNull(workspace.remapper)
@@ -156,6 +163,7 @@ class PaperWorkspaceBuilderTest {
         val warm = builder.build(request, version, detail)
         assertEquals(before, fetcher.callCount)
         assertTrue(warm.remappedClasses.containsKey("org/bukkit/craftbukkit/Added"))
+        assertEquals(setOf(addedRef), warm.referenceIndexer.references("org/bukkit/craftbukkit/Added"))
     }
 
     @Test

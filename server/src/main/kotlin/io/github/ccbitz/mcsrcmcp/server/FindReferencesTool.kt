@@ -108,7 +108,8 @@ private fun foundReferences(
     return FindReferencesOutcome.Found(
         FindReferencesResult(
             targetClass = dottedTargetClass,
-            targetMember = "${resolved.name}${resolved.desc}",
+            // The same shape the candidates are listed in, so it can be passed straight back.
+            targetMember = if (resolved.isField) "${resolved.name}: ${resolved.desc}" else "${resolved.name}${resolved.desc}",
             declaringClass = declaringInternalName.replace('/', '.'),
             declaringClassSize = size,
             declaringClassNMethods = nMethods,
@@ -119,21 +120,48 @@ private fun foundReferences(
 }
 
 private sealed interface MemberResolution {
-    data class Found(val name: String, val desc: String) : MemberResolution
+    data class Found(val name: String, val desc: String, val isField: Boolean) : MemberResolution
     data class Ambiguous(val candidates: List<String>) : MemberResolution
     object NotFound : MemberResolution
 }
 
+/**
+ * What the member argument names: a bare name, or one candidate exactly as an ambiguity lists it -
+ * "name(desc)" for a method, "name: desc" for a field. A bare name plus 'kind' can't tell two
+ * overloads apart, or the covariant bridges a compiler adds beside an override (every CraftBukkit
+ * wrapper's getHandle()), so the candidate form is the only way through those.
+ */
+private data class MemberQuery(val name: String, val methodDesc: String?, val fieldDesc: String?) {
+
+    companion object {
+
+        fun parse(member: String): MemberQuery = when {
+            '(' in member -> MemberQuery(member.substringBefore('('), "(" + member.substringAfter('('), null)
+            ": " in member -> MemberQuery(member.substringBefore(": "), null, member.substringAfter(": "))
+            else -> MemberQuery(member, null, null)
+        }
+
+    }
+
+}
+
 private fun resolveMember(indexData: IndexData, internalName: String, memberName: String, kind: String?): MemberResolution {
     val memberData = indexData.members()[internalName] ?: return MemberResolution.NotFound
-    val methodCandidates = if (kind == "field") emptyList() else memberData.methods().filter { it.name() == memberName }
-    val fieldCandidates = if (kind == "method") emptyList() else memberData.fields().filter { it.name() == memberName }
+    val query = MemberQuery.parse(memberName)
+    val wantsMethods = kind != "field" && query.fieldDesc == null
+    val wantsFields = kind != "method" && query.methodDesc == null
+    val methodCandidates = if (!wantsMethods) emptyList() else memberData.methods().filter {
+        it.name() == query.name && (query.methodDesc == null || it.desc() == query.methodDesc)
+    }
+    val fieldCandidates = if (!wantsFields) emptyList() else memberData.fields().filter {
+        it.name() == query.name && (query.fieldDesc == null || it.desc() == query.fieldDesc)
+    }
     val total = methodCandidates.size + fieldCandidates.size
 
     return when {
         total == 0 -> MemberResolution.NotFound
-        total == 1 && methodCandidates.size == 1 -> MemberResolution.Found(methodCandidates[0].name(), methodCandidates[0].desc())
-        total == 1 && fieldCandidates.size == 1 -> MemberResolution.Found(fieldCandidates[0].name(), fieldCandidates[0].desc())
+        total == 1 && methodCandidates.size == 1 -> MemberResolution.Found(methodCandidates[0].name(), methodCandidates[0].desc(), isField = false)
+        total == 1 && fieldCandidates.size == 1 -> MemberResolution.Found(fieldCandidates[0].name(), fieldCandidates[0].desc(), isField = true)
         else -> MemberResolution.Ambiguous(
             (methodCandidates.map { "${it.name()}${it.desc()}" } + fieldCandidates.map { "${it.name()}: ${it.desc()}" }).sorted(),
         )

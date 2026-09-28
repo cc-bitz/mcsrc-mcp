@@ -5,6 +5,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Predicate;
 
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassVisitor;
@@ -16,6 +17,25 @@ public final class Indexer {
     private final Map<String, Set<String>> references = new HashMap<>();
     private final Map<String, ClassData> classes = new HashMap<>();
     private final Map<String, MutableMemberData> members = new HashMap<>();
+    private final Predicate<String> referenceScope;
+
+    /**
+     * An indexer that records references to Mojang's own classes only. Every class references the
+     * JDK and its libraries, and nothing can look those up anyway, so keeping them would be heap
+     * spent on answers no query asks for.
+     */
+    public Indexer() {
+        this(owner -> owner.startsWith("net/minecraft") || owner.startsWith("com/mojang"));
+    }
+
+    /**
+     * An indexer that records references whose target class passes {@code referenceScope} - for a
+     * jar whose own code isn't all Mojang's, like a server fork's org/bukkit and io/papermc classes,
+     * where the Mojang-only default would drop every reference to them.
+     */
+    public Indexer(Predicate<String> referenceScope) {
+        this.referenceScope = referenceScope;
+    }
 
     public void index(byte[] classBytes) {
         new ClassReader(classBytes).accept(new ClassIndexVisitor(this), ClassReader.SKIP_FRAMES);
@@ -75,8 +95,11 @@ public final class Indexer {
         members.clear();
     }
 
+    // A key is a class ("a/B") or a member of one ("a/B:name:desc"); either way the class leads it.
     void addReference(String key, String value) {
-        if (key.startsWith("net/minecraft") || key.startsWith("com/mojang")) {
+        int colon = key.indexOf(':');
+        String owner = colon < 0 ? key : key.substring(0, colon);
+        if (referenceScope.test(owner)) {
             references.computeIfAbsent(key, ignored -> new HashSet<>()).add(value);
         }
     }

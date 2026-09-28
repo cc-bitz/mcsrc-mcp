@@ -203,6 +203,26 @@ class CacheEvictionTest {
         assertTrue(Files.exists(SourcePools.dir(cacheRoot, Variants.VANILLA, "26.3").resolve("b".repeat(40) + ".java")))
     }
 
+    // An indexing change leaves the build's old unit beside the new one; with no key list, it would
+    // otherwise keep the pool unswept until the TTL took it.
+    @Test
+    fun `an older unit of the same workspace is dropped and stops blocking the pool sweep`(@TempDir cacheRoot: Path) {
+        val now = Instant.now()
+        val old = makeDerivedDir(cacheRoot, "paper/26.3.build.134-beta", "v2-server-oldbuild", now.minus(Duration.ofDays(2)))
+        val current = makeDerivedDir(cacheRoot, "paper/26.3.build.134-beta", "v2-server-newbuild", now)
+        writeKeys(current, "b".repeat(40))
+        val pool = SourcePools.dir(cacheRoot, Variants.PAPER, "26.3")
+        writeEntry(pool, "a".repeat(40))
+        writeEntry(pool, "b".repeat(40))
+
+        CacheEviction.evictStale(cacheRoot, Duration.ofDays(30), now)
+
+        assertFalse(Files.exists(old))
+        assertTrue(Files.exists(current))
+        assertFalse(Files.exists(pool.resolve("a".repeat(40) + ".java")))
+        assertTrue(Files.exists(pool.resolve("b".repeat(40) + ".java")))
+    }
+
     @Test
     fun `superseded snapshots get the short ttl, releases the normal one`(@TempDir cacheRoot: Path) {
         val now = Instant.now()

@@ -11,6 +11,12 @@ import java.util.zip.ZipInputStream
 
 class VariantSetupException(message: String) : IllegalStateException(message)
 
+// Bump when fork indexing changes what a saved index holds, so builds indexed the old way are
+// rebuilt rather than loaded. f2: references to the fork's own classes are kept, not just Mojang's.
+// Vanilla's DERIVED_CACHE_VERSION is separate: a fork-only change shouldn't rebuild every vanilla
+// version. CacheEviction drops the build's old directory once the new one exists.
+private const val FORK_INDEX_VERSION = "f2"
+
 /**
  * Builds a fork's workspace from the artifacts every paperweight fork (Paper, Folia, Purpur)
  * already publishes:
@@ -39,8 +45,10 @@ class DevBundleWorkspaceBuilder(
         val sourceCacheDir = cacheRoot?.let { SourcePools.dir(it, variant, version.id) }
 
         // The server jar's hash pins the Minecraft version and the zip URL pins the build (a
-        // snapshot's URL carries its publish timestamp), which is everything the output depends on.
-        val derivedDir = cacheRoot?.let { DerivedCacheStore.directoryFor(it, request.workspaceId, serverArtifact.sha1, sha1Hex(bundle.zipUrl.toByteArray())) }
+        // snapshot's URL carries its publish timestamp), which is everything the output depends on
+        // - besides how it was indexed, which FORK_INDEX_VERSION stands in for.
+        val buildKey = sha1Hex("$FORK_INDEX_VERSION|${bundle.zipUrl}".toByteArray())
+        val derivedDir = cacheRoot?.let { DerivedCacheStore.directoryFor(it, request.workspaceId, serverArtifact.sha1, buildKey) }
         derivedDir?.let { DerivedCacheStore.load(it) }?.let { cached ->
             SourcePools.writeKeys(derivedDir, cached.remappedClasses)
             return VersionWorkspace(

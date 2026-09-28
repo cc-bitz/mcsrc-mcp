@@ -84,7 +84,7 @@ object CacheEviction {
         val cutoff = now.minus(ttl)
         // Never longer than the normal TTL: a short-lived class of version can't outlive a release.
         val snapshotCutoff = now.minus(minOf(ttl, snapshotTtl))
-        for (unit in listUnits(derivedRoot)) {
+        for (unit in dropSupersededUnits(listUnits(derivedRoot))) {
             val unitCutoff = if (unit.workspaceId in supersededSnapshots) snapshotCutoff else cutoff
             if (Files.getLastModifiedTime(unit.indexFile).toInstant().isBefore(unitCutoff)) {
                 deleteRecursively(unit.dir)
@@ -155,7 +155,7 @@ object CacheEviction {
         val derivedRoot = cacheRoot.resolve("derived")
         if (!Files.isDirectory(derivedRoot)) return
 
-        val usersByPool = listUnits(derivedRoot).groupBy { it.poolDir(derivedRoot) }
+        val usersByPool = dropSupersededUnits(listUnits(derivedRoot)).groupBy { it.poolDir(derivedRoot) }
         for (variant in Variants.ALL) {
             val variantDir = derivedRoot.resolve(variant.id)
             if (!Files.isDirectory(variantDir)) continue
@@ -248,6 +248,19 @@ object CacheEviction {
         }
         return units
     }
+
+    /**
+     * Deletes all but the most recently used unit of each workspace and returns the survivors. Two
+     * units for one workspace means a change to the index format or to how it's built
+     * (DERIVED_CACHE_VERSION, FORK_INDEX_VERSION) left the old one behind: nothing loads it again,
+     * and it predates key lists, so until it goes it would keep its pool from being swept.
+     */
+    private fun dropSupersededUnits(units: List<DerivedUnit>): List<DerivedUnit> =
+        units.groupBy { it.workspaceId }.values.map { forWorkspace ->
+            val current = forWorkspace.maxBy { Files.getLastModifiedTime(it.indexFile).toInstant() }
+            for (unit in forWorkspace) if (unit !== current) deleteRecursively(unit.dir)
+            current
+        }
 
     // Under a fork's directory, builds and pools sit side by side; a build is named by its dev
     // bundle version, a pool by its Minecraft version. Vanilla's directory holds pools only.

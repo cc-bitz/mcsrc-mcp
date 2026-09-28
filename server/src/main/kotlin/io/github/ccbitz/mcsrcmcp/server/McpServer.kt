@@ -1035,15 +1035,21 @@ private fun Server.registerTools(
         description = "Find who calls, reads, or writes a class or member. Omitting member finds " +
             "references to the class itself. A member not declared directly on the class is " +
             "resolved up the inheritance chain (unless resolve_declaration=false). An ambiguous " +
-            "member (several overloads/kinds) returns a candidate list rather than an error - " +
-            "call again with kind. Declaring and caller classes carry size/nMethods/nFields, so " +
-            "you can judge what's worth reading.",
+            "member (overloads, covariant bridges, a field and method sharing a name) returns a " +
+            "candidate list rather than an error - call again with one candidate, exactly as " +
+            "listed, as member. Declaring and caller classes carry size/nMethods/nFields, so you " +
+            "can judge what's worth reading.",
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
                 variantProp()
                 classProp()
-                stringProp("member", "Bare member name, e.g. getBlockState; omit for the class itself")
+                stringProp(
+                    "member",
+                    "Bare member name, e.g. getBlockState, or one ambiguity candidate as listed, e.g. " +
+                        "getBlockState(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState; " +
+                        "or 'name: desc' for a field; omit for the class itself",
+                )
                 stringProp("kind", "'method' or 'field', if a name is both")
                 boolProp("resolve_declaration", "Resolve up the inheritance chain (default true)")
             },

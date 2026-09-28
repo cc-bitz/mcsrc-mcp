@@ -54,9 +54,16 @@ internal object WorkspaceIndexing {
     /**
      * Indexes [classes] with no remapping - for jars that are already mojang-mapped. Returns the
      * merged indexer plus the class map keyed by each class's own (post-index) internal name.
+     *
+     * References are kept to every class in the jar rather than Mojang's alone: this is how fork
+     * jars are indexed, and a fork's own code (org/bukkit, io/papermc, org/purpurmc...) is exactly
+     * what someone reading it wants find_references on.
      */
     suspend fun indexMappedClasses(classes: List<ByteArray>): Pair<Indexer, Map<String, ByteArray>> {
-        val pass = shardedPass(classes, REMAP_PARALLELISM) { indexer, classBytes ->
+        // ClassReader.className reads only the constant pool header, so naming the whole jar up
+        // front is cheap next to the index pass it scopes.
+        val jarClasses = classes.mapTo(HashSet(classes.size)) { ClassReader(it).className }
+        val pass = shardedPass(classes, REMAP_PARALLELISM, { Indexer(jarClasses::contains) }) { indexer, classBytes ->
             indexer.index(classBytes)
             classBytes
         }
@@ -85,6 +92,7 @@ internal object WorkspaceIndexing {
     suspend fun shardedPass(
         classList: List<ByteArray>,
         parallelism: Int,
+        newIndexer: () -> Indexer = ::Indexer,
         visit: (Indexer, ByteArray) -> ByteArray?,
     ): ShardedPass = coroutineScope {
         val rawClasses = ArrayList<ByteArray?>(classList.size).apply { addAll(classList) }
@@ -95,7 +103,7 @@ internal object WorkspaceIndexing {
         val cursor = AtomicInteger()
         val indexers = (0 until width).map {
             async(Dispatchers.Default) {
-                val indexer = Indexer()
+                val indexer = newIndexer()
                 while (true) {
                     val next = cursor.getAndIncrement()
                     if (next >= rawClasses.size) break
