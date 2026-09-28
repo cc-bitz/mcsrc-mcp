@@ -92,6 +92,40 @@ class CacheEvictionTest {
     }
 
     @Test
+    fun `stale fork builds are evicted and warm ones spared over budget`(@TempDir cacheRoot: Path) {
+        val now = Instant.now()
+        val stale = makeDerivedDir(cacheRoot, "paper/26.3.build.12", "v2-aaaa-bbbb", now.minus(Duration.ofDays(60)))
+        val fresh = makeDerivedDir(cacheRoot, "paper/26.3.build.49", "v2-cccc-dddd", now.minus(Duration.ofDays(1)))
+
+        CacheEviction.evictStale(cacheRoot, Duration.ofDays(30), now)
+
+        assertFalse(Files.exists(stale.parent))
+        assertTrue(Files.exists(fresh))
+
+        Files.writeString(fresh.resolve("big.txt"), "x".repeat(2000))
+        CacheEviction.evictOverBudget(cacheRoot, 1000, warmVersions = setOf("paper/26.3.build.49"))
+
+        assertTrue(Files.exists(fresh))
+    }
+
+    // Units are found by layout, not by searching for index.bin: a shared source cache is never a
+    // unit, whatever it holds, so the TTL pass leaves it to the orphan pass.
+    @Test
+    fun `a fork's shared source cache is never treated as a unit`(@TempDir cacheRoot: Path) {
+        val now = Instant.now()
+        makeDerivedDir(cacheRoot, "paper/26.3.build.49", "v2-cccc-dddd", now)
+        val sourceCache = sharedSourceCacheDir(cacheRoot, Variants.PAPER, "26.3")
+        Files.createDirectories(sourceCache)
+        val decoy = sourceCache.resolve("index.bin")
+        Files.writeString(decoy, "{}")
+        Files.setLastModifiedTime(decoy, FileTime.from(now.minus(Duration.ofDays(60))))
+
+        CacheEviction.evictStale(cacheRoot, Duration.ofDays(30), now)
+
+        assertTrue(Files.exists(decoy))
+    }
+
+    @Test
     fun `resolveCacheTtl defaults to 30 days and honors the env override`() {
         assertEquals(Duration.ofDays(30), resolveCacheTtl(emptyMap()))
         assertEquals(Duration.ofDays(7), resolveCacheTtl(mapOf("MCSRC_MCP_CACHE_TTL_DAYS" to "7")))

@@ -11,10 +11,12 @@ import org.jetbrains.java.decompiler.struct.gen.MethodDescriptor
 import org.jetbrains.java.decompiler.util.token.TextRange
 import java.io.ByteArrayInputStream
 import java.io.InputStream
+import java.lang.ref.WeakReference
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+import java.util.HexFormat
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -240,10 +242,6 @@ object DecompileService {
      */
     internal fun sourceCacheKey(classes: Map<String, ByteArray>, className: String): String {
         val outerClassName = className.substringBefore('$')
-        val targetPrefix = "$outerClassName$"
-        val names = classes.keys
-            .filter { it == outerClassName || it.startsWith(targetPrefix) }
-            .sorted()
         if (outerClassName !in classes) {
             // Key computation must not differ from runDecompile's class-not-found behavior: a
             // missing class never reaches a cache path anyway, but the shared sweep in
@@ -251,11 +249,38 @@ object DecompileService {
             throw ClassNotFoundInIndexException(className)
         }
         val digest = MessageDigest.getInstance("SHA-1")
-        for (name in names) {
+        for (name in ClassNests.of(classes, outerClassName)) {
             digest.update(name.toByteArray(Charsets.UTF_8))
             digest.update(classes.getValue(name))
         }
-        return digest.digest().joinToString("") { "%02x".format(it) }
+        return HexFormat.of().formatHex(digest.digest())
+    }
+
+    /**
+     * Each class's nest - the outer class plus its inner classes, sorted - grouped once per class
+     * map. A decompile and its cache key each need one class's nest; finding it by scanning every
+     * name in the jar made each lookup O(classes), and the passes that key or decompile every class
+     * (the search index build, the shared-cache sweep) quadratic - on a warm shared cache, where
+     * nearly every class is a hit, that scan was most of the build. Held weakly and matched by
+     * identity: the maps are the workspaces' own, long-lived and never mutated once built, and
+     * hashing one by content to look it up would cost the very scan this avoids.
+     */
+    private object ClassNests {
+
+        private val lock = Any()
+        private val byMap = ArrayList<Pair<WeakReference<Map<String, ByteArray>>, Map<String, List<String>>>>()
+
+        fun of(classes: Map<String, ByteArray>, outerClassName: String): List<String> {
+            val nests = synchronized(lock) {
+                byMap.removeAll { it.first.get() == null }
+                byMap.firstOrNull { it.first.get() === classes }?.second
+                    ?: classes.keys.groupBy { it.substringBefore('$') }
+                        .mapValues { it.value.sorted() }
+                        .also { byMap.add(WeakReference(classes) to it) }
+            }
+            return nests[outerClassName].orEmpty()
+        }
+
     }
 
     // Token collection is opt-in rather than always-on: get_class_source runs this on every read
@@ -273,8 +298,7 @@ object DecompileService {
             throw ClassNotFoundInIndexException(className)
         }
 
-        val targetPrefix = "$outerClassName$"
-        val targetClasses = classes.filterKeys { it == outerClassName || it.startsWith(targetPrefix) }
+        val targetClasses = ClassNests.of(classes, outerClassName).associateWith { classes.getValue(it) }
 
         val future = executor.submit<DecompiledClass> {
             // Two sources: `inputs` is exactly what gets decompiled and emitted; `libraries` is

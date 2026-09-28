@@ -21,6 +21,7 @@ import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
@@ -509,10 +510,20 @@ fun buildServer(
     eulaGate: EulaGate = EulaGate(cacheRoot.resolve("eula-accepted.txt")),
     scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ): Server {
-    CacheEviction.evict(cacheRoot, resolveCacheTtl(), resolveCacheMaxSizeBytes())
-
     val blobStore = BlobStore(cacheRoot.resolve("blobs"))
     val workspaceCache = WorkspaceCache()
+
+    // Housekeeping, off the startup path: nothing the server answers depends on it having
+    // finished, and sizing the cache for the budget pass reads every file in every unit. Units
+    // already warm are spared, and a filesystem error (Windows refusing to delete a file a tool
+    // call holds open) is logged rather than taking the server down.
+    scope.launch(Dispatchers.IO) {
+        try {
+            CacheEviction.evict(cacheRoot, resolveCacheTtl(), resolveCacheMaxSizeBytes(), workspaceCache.warmVersions().toSet())
+        } catch (e: Exception) {
+            System.err.println("mcsrc-mcp: cache eviction failed: $e")
+        }
+    }
     val metadata = VersionMetadataCache(fetcher, cacheRoot)
     // One dev-bundle repository (and one builder) per registered fork - the registry is the
     // single source of truth, so a new fork is a Variant entry and nothing else.

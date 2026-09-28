@@ -48,23 +48,13 @@ object CacheEviction {
         }
 
         val cutoff = now.minus(ttl)
-
-        // A derived unit is any directory holding an index.bin. Variant workspaces nest one level
-        // deeper than vanilla (derived/paper/<build>/<hash-dir>), so this walks rather than
-        // assuming exactly two levels; the marker files variant latest-tracking leaves between
-        // build directories are plain files and don't match. The units are collected before any
-        // deletion - evicting while the lazy walk is still traversing would crash it with
-        // NoSuchFileException on the directory that just got deleted under it.
-        val unitDirs = Files.walk(derivedRoot).use { stream ->
-            stream.filter { Files.isRegularFile(it) && it.fileName.toString() == "index.bin" }
-                .map { it.parent }
-                .toList()
-        }
-        for (dir in unitDirs) {
-            evictIfStale(dir, cutoff)
+        for (unit in listUnits(derivedRoot)) {
+            if (Files.getLastModifiedTime(unit.indexFile).toInstant().isBefore(cutoff)) {
+                deleteRecursively(unit.dir)
+            }
         }
         dropOrphanedForkState(derivedRoot)
-        deleteEmptyDirs(derivedRoot)
+        deleteEmptyWorkspaceDirs(derivedRoot)
     }
 
     fun evictOverBudget(cacheRoot: Path, maxSizeBytes: Long, warmVersions: Set<String> = emptySet()) {
@@ -76,15 +66,11 @@ object CacheEviction {
             return
         }
 
-        val units = mutableListOf<CacheUnit>()
-        Files.walk(derivedRoot).use { stream ->
-            stream.filter { Files.isRegularFile(it) && it.fileName.toString() == "index.bin" }
-                .forEach { indexFile ->
-                    val dir = indexFile.parent
-                    val workspaceId = derivedRoot.relativize(dir.parent).toString().replace('\\', '/')
-                    val lastUsed = Files.getLastModifiedTime(indexFile).toInstant()
-                    units.add(CacheUnit(dir, directorySize(dir), lastUsed, isWarm = workspaceId in warmVersions))
-                }
+        // Sizing is the one step that has to read every file in a unit - there is no recorded size
+        // to trust instead - so it is the only full walk eviction does.
+        val units = listUnits(derivedRoot).map { unit ->
+            val lastUsed = Files.getLastModifiedTime(unit.indexFile).toInstant()
+            CacheUnit(unit.dir, directorySize(unit.dir), lastUsed, isWarm = unit.workspaceId in warmVersions)
         }
 
         var total = units.sumOf { it.size }
@@ -101,7 +87,7 @@ object CacheEviction {
         }
 
         dropOrphanedForkState(derivedRoot)
-        deleteEmptyDirs(derivedRoot)
+        deleteEmptyWorkspaceDirs(derivedRoot)
     }
 
     /**
@@ -125,17 +111,47 @@ object CacheEviction {
         val isWarm: Boolean,
     )
 
-    private fun evictIfStale(cacheDir: Path, cutoff: Instant) {
-        val indexFile = cacheDir.resolve("index.bin")
-        if (!Files.exists(indexFile)) {
-            return
+    /** One derived unit: a hash directory holding an index.bin, and the workspace id it belongs to. */
+    private class DerivedUnit(val dir: Path, val workspaceId: String) {
+
+        val indexFile: Path get() = dir.resolve("index.bin")
+
+    }
+
+    /**
+     * Lists every derived unit from the layout the builders write, rather than searching for
+     * index.bin files: vanilla at derived/<version>/<hash-dir> and forks at
+     * derived/<fork>/<build>/<hash-dir> (see [DerivedCacheStore.directoryFor]). Searching meant
+     * walking every cached decompile inside every unit and every fork's shared source cache - tens
+     * of thousands of files on a well-used cache - while this costs one listing per version or
+     * build directory, however many classes have been decompiled.
+     */
+    private fun listUnits(derivedRoot: Path): List<DerivedUnit> {
+        val units = mutableListOf<DerivedUnit>()
+
+        fun addUnitsIn(workspaceDir: Path, workspaceId: String) {
+            for (hashDir in subdirectories(workspaceDir)) {
+                if (Files.isRegularFile(hashDir.resolve("index.bin"))) units.add(DerivedUnit(hashDir, workspaceId))
+            }
         }
 
-        val lastUsed = Files.getLastModifiedTime(indexFile).toInstant()
-        if (lastUsed.isBefore(cutoff)) {
-            deleteRecursively(cacheDir)
+        for (top in subdirectories(derivedRoot)) {
+            val name = top.fileName.toString()
+            if (Variants.byId(name)?.devBundleRepository == null) {
+                addUnitsIn(top, name)
+                continue
+            }
+            for (build in subdirectories(top)) {
+                val buildName = build.fileName.toString()
+                // Everything else at this level is a per-Minecraft-version shared source cache.
+                if (devBundleMinecraftVersion(buildName) != null) addUnitsIn(build, "$name/$buildName")
+            }
         }
+        return units
     }
+
+    private fun subdirectories(dir: Path): List<Path> =
+        Files.list(dir).use { entries -> entries.filter { Files.isDirectory(it) }.toList() }
 
     /**
      * A fork's shared decompile cache (derived/<fork>/<mcVersion>/source-cache) and its latest
@@ -144,21 +160,16 @@ object CacheEviction {
      * once no build of their Minecraft version is left on disk.
      */
     private fun dropOrphanedForkState(derivedRoot: Path) {
+        val liveWorkspaceIds = listUnits(derivedRoot).map { it.workspaceId }
         for (variant in Variants.ALL) {
             if (variant.devBundleRepository == null) continue
             val forkDir = derivedRoot.resolve(variant.id)
             if (!Files.isDirectory(forkDir)) continue
 
             val children = Files.list(forkDir).use { it.toList() }
-            // Build directories are named by dev bundle version; the index.bin lives one level down,
-            // in the build's hash directory.
-            val versionsWithBuilds = children
-                .filter { child ->
-                    Files.isDirectory(child) &&
-                        Files.find(child, 2, { path, attrs -> attrs.isRegularFile && path.fileName.toString() == "index.bin" })
-                            .use { it.findAny().isPresent }
-                }
-                .mapNotNull { devBundleMinecraftVersion(it.fileName.toString()) }
+            val versionsWithBuilds = liveWorkspaceIds
+                .filter { it.startsWith("${variant.id}/") }
+                .mapNotNull { devBundleMinecraftVersion(it.substringAfter('/')) }
                 .toSet()
 
             for (child in children) {
@@ -173,19 +184,23 @@ object CacheEviction {
         }
     }
 
-    private fun deleteEmptyDirs(root: Path) {
-        // Bottom-up, so a chain of emptied variant directories collapses in one pass. Collected
-        // before deleting for the same mid-walk-deletion reason as evictStale.
-        val dirs = Files.walk(root).use { stream ->
-            stream.sorted(Comparator.reverseOrder())
-                .filter { Files.isDirectory(it) && it != root }
-                .toList()
-        }
-        for (dir in dirs) {
-            Files.newDirectoryStream(dir).use { entries ->
-                if (!entries.iterator().hasNext()) Files.deleteIfExists(dir)
+    /**
+     * Drops version, build and fork directories that eviction left empty. Only those levels: an
+     * empty directory inside a live unit or source cache may be one a build just created and is
+     * about to write into, and deleting it would fail that write.
+     */
+    private fun deleteEmptyWorkspaceDirs(derivedRoot: Path) {
+        for (top in subdirectories(derivedRoot)) {
+            if (Variants.byId(top.fileName.toString())?.devBundleRepository != null) {
+                for (build in subdirectories(top)) deleteIfEmpty(build)
             }
+            deleteIfEmpty(top)
         }
+    }
+
+    private fun deleteIfEmpty(dir: Path) {
+        val empty = Files.newDirectoryStream(dir).use { !it.iterator().hasNext() }
+        if (empty) Files.deleteIfExists(dir)
     }
 
     private fun directorySize(dir: Path): Long {
