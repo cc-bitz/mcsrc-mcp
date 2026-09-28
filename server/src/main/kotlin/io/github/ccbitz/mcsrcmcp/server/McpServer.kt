@@ -89,9 +89,10 @@ output in a class find_references named proves nothing - get_class_source it and
 reported members.
 
 Navigating known code: get_class_outline for a class's members (no decompile), find_references
-for "where is X used/called" - even within its own declaring class. get_class_source only to
-read actual logic, paged with start_line/max_lines, and find_declaration to jump from a symbol
-in it to where that symbol is declared - don't decompile another class just to follow one call.
+for "where is X used/called" - even within its own declaring class. get_method_source to read
+one method's logic; get_class_source only when you need more of the class than that, paged with
+start_line/max_lines. find_declaration jumps from a symbol in either to where that symbol is
+declared - don't decompile another class just to follow one call.
 If you already know the class, locating a member via search_code's classes param or by
 decompiling it whole is the wrong call.
 
@@ -914,6 +915,89 @@ private fun Server.registerTools(
                 CallToolResult(content = listOf(TextContent(text)))
             } catch (e: ClassNotFoundInIndexException) {
                 CallToolResult(content = listOf(TextContent(e.message ?: "class not found")), isError = true)
+            } catch (e: DecompileTimeoutException) {
+                CallToolResult(
+                    content = listOf(TextContent("${e.message} - try get_bytecode instead for this class.")),
+                    isError = true,
+                )
+            } catch (e: DecompileFailedException) {
+                CallToolResult(
+                    content = listOf(TextContent("${e.message} - try get_bytecode instead for this class.")),
+                    isError = true,
+                )
+            }
+        }
+    }
+
+    addTool(
+        name = "get_method_source",
+        description = "Decompiled source of one method - the part of get_class_source you actually " +
+            "wanted, without paging through the class to find it. Lines are numbered as in the " +
+            "class's source, so they work with find_declaration. A name with several overloads " +
+            "returns them as candidates - call again with one, exactly as listed. An inherited " +
+            "method comes from the class that declares it; use '<init>' or the class's simple " +
+            "name for a constructor. Lambdas are part of the method that contains them.",
+        inputSchema = ToolSchema(
+            properties = buildJsonObject {
+                versionProp()
+                variantProp()
+                classProp()
+                stringProp(
+                    "method",
+                    "Method name, e.g. tick, or one overload as listed, e.g. " +
+                        "getBlockState(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;",
+                )
+                intProp("max_lines", "Max lines (default 1500)")
+            },
+            required = listOf("version", "class", "method"),
+        ),
+    ) { request ->
+        val versionQuery = request.arguments?.get("version")?.jsonPrimitive?.content
+            ?: return@addTool CallToolResult(content = listOf(TextContent("The 'version' parameter is required.")), isError = true)
+        val className = request.classArg()
+            ?: return@addTool CallToolResult(content = listOf(TextContent("The 'class' parameter is required.")), isError = true)
+        val method = request.arguments?.get("method")?.jsonPrimitive?.content
+            ?: return@addTool CallToolResult(content = listOf(TextContent("The 'method' parameter is required.")), isError = true)
+        val maxLines = request.arguments?.get("max_lines")?.jsonPrimitive?.intOrNull ?: 1500
+
+        when (val resolved = resolver.resolve(versionQuery, request.variantArg()) { percent ->
+            sendPrepareProgress(request.meta?.progressToken, versionQuery, percent)
+        }) {
+            is ResolvedWorkspace.Failed -> resolved.result
+            is ResolvedWorkspace.Ok -> try {
+                val outcome = getMethodSourceToolLogic(
+                    resolved.workspace.indexData,
+                    resolved.workspace.remappedClasses,
+                    className,
+                    method,
+                    maxLines.coerceAtLeast(1),
+                    resolved.workspace.sourceCacheDir,
+                )
+                when (outcome) {
+                    is MethodSourceOutcome.Ambiguous -> CallToolResult(
+                        content = listOf(TextContent(Json.encodeToString(mapOf("ambiguousCandidates" to outcome.candidates)))),
+                    )
+                    is MethodSourceOutcome.Found -> {
+                        val result = outcome.result
+                        val inherited = if (result.className != className) ", inherited by $className" else ""
+                        val range = if (result.truncated) {
+                            "lines ${result.startLine}-${result.endLine} of ${result.startLine}-${result.methodEndLine}, truncated - " +
+                                "read the rest with get_class_source start_line=${result.endLine + 1}"
+                        } else {
+                            "lines ${result.startLine}-${result.methodEndLine} of ${result.totalLines}"
+                        }
+                        val numbered = result.source.lines().withIndex()
+                            .joinToString("\n") { (offset, line) -> "${result.startLine + offset}\t$line" }
+                        CallToolResult(content = listOf(TextContent("${result.className}#${result.member} ($range$inherited)\n\n$numbered")))
+                    }
+                }
+            } catch (e: ClassNotFoundInIndexException) {
+                CallToolResult(content = listOf(TextContent(e.message ?: "class not found")), isError = true)
+            } catch (e: MemberNotFoundException) {
+                CallToolResult(
+                    content = listOf(TextContent("${e.message} - get_class_outline lists what the class declares.")),
+                    isError = true,
+                )
             } catch (e: DecompileTimeoutException) {
                 CallToolResult(
                     content = listOf(TextContent("${e.message} - try get_bytecode instead for this class.")),

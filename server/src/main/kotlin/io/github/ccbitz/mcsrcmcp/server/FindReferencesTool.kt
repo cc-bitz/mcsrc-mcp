@@ -189,7 +189,7 @@ private sealed interface MemberResolution {
  * overloads apart, or the covariant bridges a compiler adds beside an override (every CraftBukkit
  * wrapper's getHandle()), so the candidate form is the only way through those.
  */
-private data class MemberQuery(val name: String, val methodDesc: String?, val fieldDesc: String?) {
+internal data class MemberQuery(val name: String, val methodDesc: String?, val fieldDesc: String?) {
 
     companion object {
 

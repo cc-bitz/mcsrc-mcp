@@ -248,7 +248,7 @@ private class DeclarationLookup(
  * counting newlines per token. Every call resolves several tokens against the same source, and
  * find_declaration is on the interactive path.
  */
-private class LineIndex(private val source: String) {
+internal class LineIndex(private val source: String) {
     private val starts = buildList {
         add(0)
         source.forEachIndexed { index, char -> if (char == '\n') add(index + 1) }
