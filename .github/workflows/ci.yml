@@ -39,6 +39,11 @@ jobs:
           path: "**/build/reports/tests/**"
           if-no-files-found: ignore
 
+      # The nightly job has no checkout, so the scripts travel with the jar it publishes them beside.
+      - name: Add scripts to distribution
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: cp scripts/run-server.ps1 scripts/autostart.ps1 dist/
+
       # Hands the tested jar to the nightly job, so what gets published is exactly what passed.
       - name: Upload distribution
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -77,5 +82,5 @@ jobs:
         # and release.yml only listens for v* anyway.
         run: |
           gh api -X PATCH "repos/${GH_REPO}/git/refs/tags/nightly-build" -f sha="${GITHUB_SHA}" -F force=true
-          gh release upload nightly-build dist/mcsrc-mcp.jar dist/mcsrc-mcp.bat scripts/run-server.ps1 scripts/autostart.ps1 --clobber
+          gh release upload nightly-build dist/mcsrc-mcp.jar dist/mcsrc-mcp.bat dist/run-server.ps1 dist/autostart.ps1 --clobber
           gh release edit nightly-build --prerelease --notes "Built from ${GITHUB_SHA} on $(date -u +%Y-%m-%d)."
