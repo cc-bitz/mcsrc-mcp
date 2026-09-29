@@ -56,24 +56,24 @@ object Variants {
         Variant(
             PAPER,
             "Paper",
-            "Paper server sources, from the official mojang-mapped paperclip artifact: vanilla " +
-                "code as recompiled with Paper's patches, plus Paper's own classes (CraftBukkit, " +
-                "Spigot). No client assets.",
+            "Paper server sources from its dev bundle: on 26.x Paper's real source - vanilla with " +
+                "Paper's patches applied, comments and all, plus its own classes (CraftBukkit, " +
+                "Spigot) - and decompiled bytecode before that. No client assets.",
             "https://repo.papermc.io/repository/maven-public/io/papermc/paper/dev-bundle",
         ),
         Variant(
             FOLIA,
             "Folia",
             "Folia server sources: the Paper fork that adds regionised multithreading, from its " +
-                "mojang-mapped paperclip artifact. Folia trails Paper, so the newest Minecraft " +
-                "versions may not have a build yet. No client assets.",
+                "dev bundle - its real source on 26.x, as for Paper. Folia trails Paper, so the newest " +
+                "Minecraft versions may not have a build yet. No client assets.",
             "https://repo.papermc.io/repository/maven-public/dev/folia/dev-bundle",
         ),
         Variant(
             PURPUR,
             "Purpur",
             "Purpur server sources: the Paper fork focused on configurable gameplay, from its " +
-                "mojang-mapped paperclip artifact - Paper's patches plus Purpur's own. No client " +
+                "dev bundle - Paper's patches plus Purpur's own, as real source on 26.x. No client " +
                 "assets.",
             "https://repo.purpurmc.org/snapshots/org/purpurmc/purpur/dev-bundle",
         ),

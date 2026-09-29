@@ -3,6 +3,7 @@ package io.github.ccbitz.mcsrcmcp.server
 import io.github.ccbitz.mcsrcmcp.cache.BlobStore
 import io.github.ccbitz.mcsrcmcp.cache.VersionDetail
 import io.github.ccbitz.mcsrcmcp.cache.VersionListEntry
+import io.github.ccbitz.mcsrcmcp.core.IndexData
 import io.github.ccbitz.mcsrcmcp.core.Indexer
 import java.nio.file.Files
 import java.nio.file.Path
@@ -25,6 +26,8 @@ private const val FORK_INDEX_VERSION = "f2"
  * 2. download the bundle zip and the vanilla server jar it binpatches,
  * 3. apply the bundle's mojang-mapped paperclip patches (whole-jar bsdiff + sha256 checks),
  * 4. index the resulting jar - it is already mojang-mapped, so no remap pass runs at all.
+ * 5. in the background, build the fork's real source from the same bundle ([ForkSourceTrees]);
+ *    decompiles serve every read until it's there.
  *
  * The heavy derived outputs (class jar, index) land in a per-build directory keyed by the server
  * jar hash and the bundle's zip URL, so a warm build is found without downloading the ~26MB bundle
@@ -37,12 +40,20 @@ class DevBundleWorkspaceBuilder(
     private val fetcher: BlobFetcher,
     private val cacheRoot: Path?,
     private val devBundles: DevBundleRepository,
+    // Null serves decompiles only - tests, and servers with nowhere to build a tree.
+    private val sourceTrees: ForkSourceTrees? = null,
 ) : VersionWorkspaceBuilder {
     override suspend fun build(request: WorkspaceRequest, version: VersionListEntry, detail: VersionDetail): VersionWorkspace {
         val serverArtifact = detail.downloads.server
             ?: throw VariantSetupException("Mojang published no server jar for ${version.id}, so $variant sources cannot be built")
         val bundle = request.bundle ?: devBundles.resolve(version.id, request.build)
         val sourceCacheDir = cacheRoot?.let { SourcePools.dir(it, variant, version.id) }
+        val serverJar: suspend () -> Path = {
+            blobStore.pathIfPresent(serverArtifact.sha1) ?: blobStore.put(fetcher.fetch(serverArtifact.url), serverArtifact.sha1)
+        }
+        fun sourcesFor(unitDir: Path?, classes: Map<String, ByteArray>, index: IndexData, bundleZip: ByteArray?): ClassSources =
+            sourceTrees?.sourcesFor(request.workspaceId, unitDir, sourceCacheDir, classes, index, bundle, version.id, serverJar, bundleZip)
+                ?: DecompiledSources(classes, sourceCacheDir)
 
         // The server jar's hash pins the Minecraft version and the zip URL pins the build (a
         // snapshot's URL carries its publish timestamp), which is everything the output depends on
@@ -61,11 +72,13 @@ class DevBundleWorkspaceBuilder(
                 EmptyAssetSource,
                 derivedDir,
                 sourceCacheDir,
+                sourcesFor(derivedDir, cached.remappedClasses, cached.indexData, bundleZip = null),
             )
         }
 
+        // Kept past the paperclip step: the source tree reads its patches from the same bundle.
+        val bundleZip = fetcher.fetch(bundle.zipUrl)
         val paperclipJar = run {
-            val bundleZip = fetcher.fetch(bundle.zipUrl)
             val config = parseDevBundleConfig(
                 PaperclipPatcher.readZipEntry(bundleZip, "config.json")?.toString(Charsets.UTF_8)
                     ?: throw VariantSetupException("$variant dev bundle ${bundle.version} has no config.json"),
@@ -83,7 +96,7 @@ class DevBundleWorkspaceBuilder(
 
         // The patch base is the server classes jar nested inside Mojang's bundler wrapper, not the
         // wrapper download itself - paperclip's originalHash covers the nested jar.
-        val serverJarPath = blobStore.pathIfPresent(serverArtifact.sha1) ?: blobStore.put(fetcher.fetch(serverArtifact.url), serverArtifact.sha1)
+        val serverJarPath = serverJar()
         val patchedJar = PaperclipPatcher.apply(paperclipJar, PaperclipPatcher.extractVanillaServerJar(Files.readAllBytes(serverJarPath)))
 
         val classes = ZipInputStream(patchedJar.inputStream()).use { zip ->
@@ -113,6 +126,7 @@ class DevBundleWorkspaceBuilder(
             EmptyAssetSource,
             derivedDir,
             sourceCacheDir,
+            sourcesFor(derivedDir, classesByName, indexData, bundleZip),
         )
     }
 

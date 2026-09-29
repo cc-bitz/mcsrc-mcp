@@ -64,6 +64,21 @@ object SourcePools {
         }
     }
 
+    /**
+     * Adds [keys] to [unitDir]'s list - a fork build's source tree lives in the same pool as its
+     * decompiles, and its entries must survive the same sweep.
+     */
+    fun addKeys(unitDir: Path, keys: Set<String>) {
+        val merged = (readKeys(unitDir).orEmpty() + keys).sorted()
+        val tmp = Files.createTempFile(unitDir, "keys-", ".tmp")
+        try {
+            Files.writeString(tmp, merged.joinToString("\n"))
+            Files.move(tmp, unitDir.resolve(KEYS_FILE), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        } finally {
+            Files.deleteIfExists(tmp)
+        }
+    }
+
     /** The keys [unitDir] recorded, or null when it has no list yet - nothing is known about it. */
     fun readKeys(unitDir: Path): Set<String>? {
         val file = unitDir.resolve(KEYS_FILE)

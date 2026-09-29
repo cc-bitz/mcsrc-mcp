@@ -135,6 +135,56 @@ class CacheEvictionTest {
         Files.writeString(pool.resolve("$key.tokens.json"), "[]")
     }
 
+    // A fork build's source-tree entries live in the same pool as its decompiles and are listed the
+    // same way; an entry no build lists goes like any other.
+    @Test
+    fun `source tree entries are swept with the pool`(@TempDir cacheRoot: Path) {
+        val unit = makeDerivedDir(cacheRoot, "paper/26.3.build.49", "v2-aaaa-bbbb", Instant.now())
+        writeKeys(unit, "a".repeat(40))
+        val pool = SourcePools.dir(cacheRoot, Variants.PAPER, "26.3")
+        for (key in listOf("a", "b")) {
+            Files.createDirectories(pool)
+            Files.writeString(pool.resolve("${key.repeat(40)}.java"), "class X {}")
+            Files.writeString(pool.resolve("${key.repeat(40)}${ForkSourceTree.ENTRY_SUFFIX}"), "{}")
+        }
+
+        CacheEviction.sweepSourcePools(cacheRoot)
+
+        assertTrue(Files.exists(pool.resolve("a".repeat(40) + ForkSourceTree.ENTRY_SUFFIX)))
+        assertFalse(Files.exists(pool.resolve("b".repeat(40) + ForkSourceTree.ENTRY_SUFFIX)))
+        assertFalse(Files.exists(pool.resolve("b".repeat(40) + ".java")))
+    }
+
+    @Test
+    fun `clearing a fork build drops its source tree entries too`(@TempDir cacheRoot: Path) {
+        val unit = makeDerivedDir(cacheRoot, "paper/26.3.build.49", "v2-aaaa-bbbb", Instant.now())
+        writeKeys(unit, "a".repeat(40))
+        val pool = SourcePools.dir(cacheRoot, Variants.PAPER, "26.3")
+        Files.createDirectories(pool)
+        Files.writeString(pool.resolve("a".repeat(40) + ".java"), "class X {}")
+        Files.writeString(pool.resolve("a".repeat(40) + ForkSourceTree.ENTRY_SUFFIX), "{}")
+
+        CacheEviction.evictWorkspace(cacheRoot, Variants.PAPER, "paper/26.3.build.49", "26.3")
+
+        assertFalse(Files.exists(pool.resolve("a".repeat(40) + ForkSourceTree.ENTRY_SUFFIX)))
+    }
+
+    // A Minecraft version's mache tree serves every fork's builds of it; it goes with the last one.
+    @Test
+    fun `a mache tree goes once no fork build of its version is left`(@TempDir cacheRoot: Path) {
+        makeDerivedDir(cacheRoot, "folia/26.3.build.7", "v2-aaaa-bbbb", Instant.now())
+        val mache = cacheRoot.resolve("derived").resolve(MacheTreeBuilder.MACHE_DIR)
+        for (version in listOf("26.3", "26.2")) {
+            Files.createDirectories(mache.resolve(version).resolve("$version+build.1"))
+            Files.writeString(mache.resolve(version).resolve("$version+build.1").resolve(MacheTreeBuilder.TREE_FILE), "zip")
+        }
+
+        CacheEviction.sweepSourcePools(cacheRoot)
+
+        assertTrue(Files.exists(mache.resolve("26.3")))
+        assertFalse(Files.exists(mache.resolve("26.2")))
+    }
+
     // A class that changed in a later version leaves its old entry behind; once no version still
     // on disk lists that entry's key, it goes.
     @Test

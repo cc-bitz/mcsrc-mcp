@@ -68,6 +68,11 @@ tasks.processResources {
     from(project(":bridge").tasks.named("jar")) {
         rename { "bridge.jar" }
     }
+    // Same jar-in-jar arrangement for the fork source trees' decompiler: it runs in a child JVM
+    // next to mache's Vineflower, with nothing else on the classpath (see decompiler/build.gradle.kts).
+    from(project(":decompiler").tasks.named("jar")) {
+        rename { "decompiler.jar" }
+    }
 
     // The core sources ported from FabricMC/mcsrc are MIT, and MIT wants its notice to travel with
     // every substantial portion it ships in - which includes the fat jar. Routing the files through

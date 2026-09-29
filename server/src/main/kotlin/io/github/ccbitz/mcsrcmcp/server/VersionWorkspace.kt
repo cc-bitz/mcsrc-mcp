@@ -93,6 +93,8 @@ class VersionWorkspace(
      * reuse their decompiles across workspaces. Null disables caching.
      */
     val sourceCacheDir: Path? = null,
+    /** Where the tools read source from: decompiles, or a fork's real source ([TreeSources]). */
+    val sources: ClassSources = DecompiledSources(remappedClasses, sourceCacheDir),
 )
 
 /**

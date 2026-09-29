@@ -62,6 +62,7 @@ fun findDeclarationToolLogic(
     dottedClassName: String,
     useSite: UseSite,
     sourceCacheDir: Path? = null,
+    sources: ClassSources = DecompiledSources(remappedClasses, sourceCacheDir),
 ): FindDeclarationResult {
     val internalName = dottedClassName.replace('.', '/')
     if (internalName !in indexData.classes()) {
@@ -69,22 +70,21 @@ fun findDeclarationToolLogic(
     }
 
     return when (useSite) {
-        is UseSite.SourceLine -> fromSource(indexData, remappedClasses, dottedClassName, internalName, useSite, sourceCacheDir)
-        is UseSite.BytecodeLine -> fromBytecode(indexData, remappedClasses, dottedClassName, internalName, useSite, sourceCacheDir)
+        is UseSite.SourceLine -> fromSource(indexData, dottedClassName, internalName, useSite, sources)
+        is UseSite.BytecodeLine -> fromBytecode(indexData, remappedClasses, dottedClassName, internalName, useSite, sources)
     }
 }
 
 private fun fromSource(
     indexData: IndexData,
-    remappedClasses: Map<String, ByteArray>,
     dottedClassName: String,
     internalName: String,
     useSite: UseSite.SourceLine,
-    sourceCacheDir: Path?,
+    sources: ClassSources,
 ): FindDeclarationResult {
     val (line, symbol, column) = useSite
-    val lookup = DeclarationLookup(remappedClasses, sourceCacheDir)
-    val decompiled = DecompileService.decompileWithTokens(remappedClasses, internalName, cacheDir = sourceCacheDir)
+    val lookup = DeclarationLookup(sources)
+    val decompiled = sources.withTokens(internalName)
     val lineIndex = LineIndex(decompiled.source)
     val lineStart = lineIndex.startOf(line) ?: throw LineOutOfRangeException(dottedClassName, line, lineIndex.count)
     val lineEnd = lineIndex.endOf(line)
@@ -126,7 +126,7 @@ private fun fromBytecode(
     dottedClassName: String,
     internalName: String,
     useSite: UseSite.BytecodeLine,
-    sourceCacheDir: Path?,
+    sources: ClassSources,
 ): FindDeclarationResult {
     val bytes = remappedClasses[internalName] ?: throw ClassNotFoundInIndexException(dottedClassName)
     val lines = BytecodePrinter.print(*arrayOf(bytes)).lines()
@@ -137,7 +137,7 @@ private fun fromBytecode(
     val token = referenceOn(text) ?: return FindDeclarationResult(dottedClassName, useSite.line, emptyList())
 
     val declaringClass = declaringClassOf(indexData, token)
-    val site = declaringClass?.let { DeclarationLookup(remappedClasses, sourceCacheDir).siteOf(it, token) }
+    val site = declaringClass?.let { DeclarationLookup(sources).siteOf(it, token) }
     val target = DeclarationTarget(
         symbol = token.member?.name ?: token.className.substringAfterLast('/'),
         kind = token.kind,
@@ -215,17 +215,14 @@ private class DeclarationSite(val line: Int, val snippet: String)
  * most once however many symbols on the line resolve into it - which is the common case, since a
  * line usually works against one or two types.
  */
-private class DeclarationLookup(
-    private val remappedClasses: Map<String, ByteArray>,
-    private val sourceCacheDir: Path?,
-) {
+private class DeclarationLookup(private val sources: ClassSources) {
     private val decompiled = mutableMapOf<String, DecompiledClass?>()
     private val lineIndexes = mutableMapOf<String, LineIndex>()
 
     fun siteOf(declaringInternalName: String, token: SourceToken): DeclarationSite? {
         val source = decompiled.getOrPut(declaringInternalName) {
             try {
-                DecompileService.decompileWithTokens(remappedClasses, declaringInternalName, cacheDir = sourceCacheDir)
+                sources.withTokens(declaringInternalName)
             } catch (e: ClassNotFoundInIndexException) {
                 // A JDK or otherwise out-of-jar type: the owner is still worth reporting, the
                 // source is just not ours to show.

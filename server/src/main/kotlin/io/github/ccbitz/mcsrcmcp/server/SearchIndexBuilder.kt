@@ -26,7 +26,9 @@ class SearchIndexBuilder(
      * sequential build this replaced.
      */
     suspend fun build(onProgress: (Int) -> Unit = {}): SearchIndex {
-        val sourceCacheDir = workspace.sourceCacheDir
+        // A fork's real source may still be building; indexing the decompiles in the meantime would
+        // leave search results whose lines don't match what get_class_source then shows.
+        workspace.sources.awaitSettled()
         val classNames = workspace.remappedClasses.keys
             .filter { !it.contains('$') }
             .sorted()
@@ -46,13 +48,7 @@ class SearchIndexBuilder(
                     if (!coroutineContext.isActive) return@coroutineScope
 
                     val sources = batch.map { internalName ->
-                        async(Dispatchers.IO) {
-                            DecompileService.decompileClass(
-                                workspace.remappedClasses,
-                                internalName,
-                                cacheDir = sourceCacheDir,
-                            )
-                        }
+                        async(Dispatchers.IO) { workspace.sources.source(internalName) }
                     }.awaitAll()
 
                     for ((internalName, source) in batch.zip(sources)) {

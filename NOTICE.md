@@ -57,6 +57,11 @@ Mojang's obfuscation mapping files, downloaded at runtime into this server's cac
 their own license terms. Those terms accompany the `client_mappings.txt` Mojang serves and
 are not reproduced here.
 
+Fork source trees are built from tools and data PaperMC publishes, downloaded at runtime from
+its Maven repository and never shipped with this project: mache's patches and codebook-cli (both
+LGPL-3.0), the unpick definitions, and the Vineflower version mache names. The fork patches
+themselves come from each fork's dev bundle under that fork's own license.
+
 Every tool that fetches or serves Minecraft content is gated behind acceptance of the
 [Minecraft EULA](https://www.minecraft.net/en-us/eula). Accept it by setting
 `MCSRC_MCP_ACCEPT_EULA=1` in the server's environment, or by writing `accepted` to

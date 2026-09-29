@@ -18,9 +18,10 @@ fun getClassSourceToolLogic(
     startLine: Int = 1,
     maxLines: Int = 1500,
     sourceCacheDir: Path? = null,
+    sources: ClassSources = DecompiledSources(remappedClasses, sourceCacheDir),
 ): ClassSourceResult {
     val internalName = dottedClassName.replace('.', '/')
-    val fullSource = DecompileService.decompileClass(remappedClasses, internalName, cacheDir = sourceCacheDir)
+    val fullSource = sources.source(internalName)
     val lines = fullSource.lines()
     val totalLines = lines.size
     val fromIndex = (startLine - 1).coerceIn(0, lines.size)

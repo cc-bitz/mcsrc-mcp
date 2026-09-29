@@ -50,6 +50,7 @@ fun getMethodSourceToolLogic(
     member: String,
     maxLines: Int = 1500,
     sourceCacheDir: Path? = null,
+    sources: ClassSources = DecompiledSources(remappedClasses, sourceCacheDir),
 ): MethodSourceOutcome {
     val internalName = dottedClassName.replace('.', '/')
     if (internalName !in indexData.classes()) {
@@ -67,7 +68,7 @@ fun getMethodSourceToolLogic(
         // Out-of-jar ancestors (the JDK) are in the index's hierarchy but have no bytes to decompile.
         if (!declares || owner !in remappedClasses) continue
 
-        val decompiled = DecompileService.decompileWithTokens(remappedClasses, owner, cacheDir = sourceCacheDir)
+        val decompiled = sources.withTokens(owner)
         val declarations = decompiled.tokens.filter { token ->
             token.declaration && token.kind == TokenKind.METHOD && token.className == owner &&
                 token.member?.name == query.name && (query.methodDesc == null || token.member.descriptor == query.methodDesc)

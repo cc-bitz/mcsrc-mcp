@@ -549,10 +549,12 @@ fun buildServer(
             variant.devBundleRepository?.let { variant.id to DevBundleRepository(variant.id, it, fetcher, cacheRoot.resolve("meta")) }
         }
         .toMap()
+    // One for every fork: a Minecraft version's mache tree is shared by all of them.
+    val sourceTrees = ForkSourceTrees(MacheTreeBuilder(cacheRoot, MavenArtifacts(fetcher, blobStore)), fetcher, scope)
     val builders = VariantBuilders(
         listOf(VanillaWorkspaceBuilder(blobStore, fetcher, cacheRoot)) +
             Variants.ALL.filter { it.devBundleRepository != null }.map { variant ->
-                DevBundleWorkspaceBuilder(variant.id, blobStore, fetcher, cacheRoot, devBundleRepos.getValue(variant.id))
+                DevBundleWorkspaceBuilder(variant.id, blobStore, fetcher, cacheRoot, devBundleRepos.getValue(variant.id), sourceTrees)
             },
     )
     val versionPreparer = VersionPreparer(workspaceCache, builders, scope, cacheRoot)
@@ -882,8 +884,9 @@ private fun Server.registerTools(
 
     addTool(
         name = "get_class_source",
-        description = "Decompiled Java source for a class. Asking for an inner class decompiles " +
-            "its outer class - inner classes are inlined into it.",
+        description = "Java source for a class: decompiled for vanilla, the fork's own patched source " +
+            "(comments included) for Paper/Folia/Purpur on 26.x. Asking for an inner class gives its " +
+            "outer class - inner classes are inlined into it.",
         inputSchema = ToolSchema(
             properties = buildJsonObject {
                 versionProp()
@@ -906,8 +909,8 @@ private fun Server.registerTools(
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
             is ResolvedWorkspace.Ok -> try {
-                val sourceCacheDir = resolved.workspace.sourceCacheDir
-                val source = getClassSourceToolLogic(resolved.workspace.remappedClasses, className, startLine, maxLines, sourceCacheDir)
+                val workspace = resolved.workspace
+                val source = getClassSourceToolLogic(workspace.remappedClasses, className, startLine, maxLines, sources = workspace.sources)
                 val text = formatContentResult(source.className, source.source, source.startLine, source.totalLines, source.truncated)
                 CallToolResult(content = listOf(TextContent(text)))
             } catch (e: ClassNotFoundInIndexException) {
@@ -968,7 +971,7 @@ private fun Server.registerTools(
                     className,
                     method,
                     maxLines.coerceAtLeast(1),
-                    resolved.workspace.sourceCacheDir,
+                    sources = resolved.workspace.sources,
                 )
                 when (outcome) {
                     is MethodSourceOutcome.Ambiguous -> CallToolResult(
@@ -1234,13 +1237,12 @@ private fun Server.registerTools(
         }) {
             is ResolvedWorkspace.Failed -> resolved.result
             is ResolvedWorkspace.Ok -> try {
-                val sourceCacheDir = resolved.workspace.sourceCacheDir
                 val result = findDeclarationToolLogic(
                     resolved.workspace.indexData,
                     resolved.workspace.remappedClasses,
                     className,
                     useSite,
-                    sourceCacheDir,
+                    sources = resolved.workspace.sources,
                 )
                 CallToolResult(content = listOf(TextContent(Json.encodeToString(result))))
             } catch (e: ClassNotFoundInIndexException) {

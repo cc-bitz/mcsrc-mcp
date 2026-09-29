@@ -38,6 +38,10 @@ data class DevBundle(val version: String, val zipUrl: String)
 data class DevBundleConfig(
     val minecraftVersion: String,
     val mojangMappedPaperclipFile: String? = null,
+    // Bundles since the fork moved onto mache (1.21.4) name it and ship their source patches; see
+    // MacheTreeBuilder and ForkSourceTree.
+    val mache: MacheRef? = null,
+    val patchDir: String? = null,
 )
 
 private val metadataJson = Json { ignoreUnknownKeys = true }

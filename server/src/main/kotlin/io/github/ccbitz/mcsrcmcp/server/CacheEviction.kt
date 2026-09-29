@@ -13,6 +13,9 @@ private const val DEFAULT_CACHE_TTL_DAYS = 30L
 private const val DEFAULT_SNAPSHOT_TTL_DAYS = 7L
 private const val DEFAULT_MAX_SIZE_GB = 10L
 
+// A mache tree build takes well under a minute; a work directory this old was left by a crash.
+private val ABANDONED_WORK_AGE = Duration.ofHours(6)
+
 fun resolveCacheTtl(env: Map<String, String> = System.getenv()): Duration {
     val raw = env["MCSRC_MCP_CACHE_TTL_DAYS"] ?: return Duration.ofDays(DEFAULT_CACHE_TTL_DAYS)
     val days = raw.toLongOrNull() ?: return Duration.ofDays(DEFAULT_CACHE_TTL_DAYS)
@@ -155,7 +158,9 @@ object CacheEviction {
         val derivedRoot = cacheRoot.resolve("derived")
         if (!Files.isDirectory(derivedRoot)) return
 
-        val usersByPool = dropSupersededUnits(listUnits(derivedRoot)).groupBy { it.poolDir(derivedRoot) }
+        val units = dropSupersededUnits(listUnits(derivedRoot))
+        val usersByPool = units.groupBy { it.poolDir(derivedRoot) }
+        sweepMacheTrees(derivedRoot, units)
         for (variant in Variants.ALL) {
             val variantDir = derivedRoot.resolve(variant.id)
             if (!Files.isDirectory(variantDir)) continue
@@ -174,6 +179,33 @@ object CacheEviction {
                 }
             }
         }
+    }
+
+    /**
+     * A Minecraft version's mache tree ([MacheTreeBuilder]) is only read to build fork source trees,
+     * so it goes once no fork build of that version is left - the builds already hold their trees in
+     * their pools. Work directories a crashed build left behind go too, once they're old enough that
+     * no build could still be writing them.
+     */
+    private fun sweepMacheTrees(derivedRoot: Path, units: List<DerivedUnit>) {
+        val macheRoot = derivedRoot.resolve(MacheTreeBuilder.MACHE_DIR)
+        if (!Files.isDirectory(macheRoot)) return
+        val forkVersions = units.filter { it.variant != Variants.VANILLA }.mapTo(HashSet()) { it.poolKey }
+        val staleWork = Instant.now().minus(ABANDONED_WORK_AGE)
+        for (versionDir in subdirectories(macheRoot)) {
+            if (versionDir.fileName.toString() !in forkVersions) {
+                deleteRecursively(versionDir)
+                continue
+            }
+            for (treeDir in subdirectories(versionDir)) {
+                for (work in subdirectories(treeDir)) {
+                    if (work.fileName.toString().startsWith("work-") && Files.getLastModifiedTime(work).toInstant().isBefore(staleWork)) {
+                        deleteRecursively(work)
+                    }
+                }
+            }
+        }
+        deleteIfEmpty(macheRoot)
     }
 
     /**
@@ -206,6 +238,7 @@ object CacheEviction {
         for (key in keys.flatMap { it!! }) {
             Files.deleteIfExists(pool.resolve("$key.java"))
             Files.deleteIfExists(pool.resolve("$key.tokens.json"))
+            Files.deleteIfExists(pool.resolve("$key${ForkSourceTree.ENTRY_SUFFIX}"))
         }
     }
 
@@ -256,6 +289,9 @@ object CacheEviction {
             val name = top.fileName.toString()
             val variant = Variants.byId(name)
             when {
+                // Mache trees are shared inputs to fork builds, not units; see sweepMacheTrees.
+                name == MacheTreeBuilder.MACHE_DIR -> continue
+
                 variant == null ->
                     addUnitsIn(top, name, Variants.VANILLA, SourcePools.poolKey(Variants.VANILLA, name))
 
@@ -313,6 +349,7 @@ object CacheEviction {
                 val name = entry.fileName.toString()
                 val key = when {
                     name.endsWith(".tokens.json") -> name.removeSuffix(".tokens.json")
+                    name.endsWith(ForkSourceTree.ENTRY_SUFFIX) -> name.removeSuffix(ForkSourceTree.ENTRY_SUFFIX)
                     name.endsWith(".java") -> name.removeSuffix(".java")
                     // Anything else is not an entry - an in-flight write's temp file above all.
                     else -> continue

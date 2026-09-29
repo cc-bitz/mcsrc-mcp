@@ -41,6 +41,17 @@ Then point the client at it. For Claude Code:
 }
 ```
 
+## Paper, Folia and Purpur
+
+For Minecraft 26.x, fork variants serve the fork's real source — vanilla with the fork's patches
+applied, `// Paper start` comments and Javadoc included, plus its own classes — rather than a
+decompile of its jar. It is rebuilt the way paperweight's userdev builds it: codebook's unpick, a
+whole-jar Vineflower decompile with mache's settings, mache's patches, then the dev bundle's. The
+first use of a Minecraft version takes about a minute in the background (reads get decompiles
+meanwhile); every fork and build of that version shares the result. `find_declaration` and
+`get_method_source` resolve the fork's lines from its own bytecode, whose line numbers match this
+source. Older versions — obfuscated mache, or no mache — keep serving decompiled bytecode.
+
 ## Cache
 
 Downloaded and derived files are cached under `%LOCALAPPDATA%\mcsrc-mcp\cache` (Windows),

@@ -3,4 +3,4 @@ plugins {
 }
 
 rootProject.name = "mcsrc-mcp"
-include("core", "cache", "server", "bridge")
+include("core", "cache", "server", "bridge", "decompiler")

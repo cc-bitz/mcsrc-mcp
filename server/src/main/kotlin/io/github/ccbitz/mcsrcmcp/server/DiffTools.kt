@@ -97,16 +97,8 @@ fun diffClassToolLogic(
 ): DiffClassResult {
     val internalName = dottedClassName.replace('.', '/')
 
-    val sourceA = DecompileService.decompileClass(
-        workspaceA.remappedClasses,
-        internalName,
-        cacheDir = workspaceA.sourceCacheDir,
-    )
-    val sourceB = DecompileService.decompileClass(
-        workspaceB.remappedClasses,
-        internalName,
-        cacheDir = workspaceB.sourceCacheDir,
-    )
+    val sourceA = workspaceA.sources.source(internalName)
+    val sourceB = workspaceB.sources.source(internalName)
 
     val diff = unifiedDiff(
         oldLines = sourceA.lines(),
