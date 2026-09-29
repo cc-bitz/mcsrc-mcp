@@ -24,6 +24,7 @@ class ForkSourceTrees(
         label: String,
         unitDir: Path?,
         poolDir: Path?,
+        treeDir: Path?,
         classes: Map<String, ByteArray>,
         index: IndexData,
         bundle: DevBundle,
@@ -32,9 +33,9 @@ class ForkSourceTrees(
         bundleZip: ByteArray?,
     ): ClassSources {
         val fallback = DecompiledSources(classes, poolDir)
-        if (unitDir == null || poolDir == null) return fallback
+        if (unitDir == null || treeDir == null) return fallback
 
-        val sources = TreeSources(classes, index, poolDir, fallback)
+        val sources = TreeSources(classes, index, treeDir, fallback)
         ForkSourceTree.readManifest(unitDir)?.let { tree ->
             sources.publish(tree)
             return sources
@@ -60,11 +61,12 @@ class ForkSourceTrees(
                     return@launch
                 }
 
-                val result = ForkSourceTree.build(tree, zip, patchDir!!, poolDir)
+                val result = ForkSourceTree.build(tree, zip, patchDir!!, treeDir)
                 ForkSourceTree.writeManifest(unitDir, result.tree)
                 sources.publish(result.tree)
                 val failed = if (result.failed.isEmpty()) "" else "; ${result.failed.size} patches didn't apply, those classes stay decompiled"
-                System.err.println("mcsrc-mcp: $label now serves its source tree (${result.tree.size} classes$failed)")
+                val reused = result.tree.size - result.written
+                System.err.println("mcsrc-mcp: $label now serves its source tree (${result.tree.size} classes, $reused shared with earlier builds$failed)")
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

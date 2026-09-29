@@ -122,7 +122,11 @@ object CacheEviction {
             CacheUnit(unit, directorySize(unit.dir), lastUsed, isWarm = unit.workspaceId in warmVersions)
         }
 
-        var total = sized.sumOf { it.size } + poolSizes.values.sum()
+        // Every fork's source trees, in one shared directory - see [SourcePools.treeDir].
+        val treeRoot = derivedRoot.resolve(SourcePools.TREE_POOL)
+        var treeSize = directorySize(treeRoot)
+
+        var total = sized.sumOf { it.size } + poolSizes.values.sum() + treeSize
         if (total <= maxSizeBytes) {
             return
         }
@@ -141,6 +145,13 @@ object CacheEviction {
             val after = directorySize(pool)
             total -= poolSizes.getValue(pool) - after
             poolSizes[pool] = after
+
+            if (candidate.unit.variant != Variants.VANILLA) {
+                sweepTreePool(derivedRoot, units.filter { Files.exists(it.dir) })
+                val treeAfter = directorySize(treeRoot)
+                total -= treeSize - treeAfter
+                treeSize = treeAfter
+            }
         }
 
         sweepSourcePools(cacheRoot)
@@ -161,6 +172,7 @@ object CacheEviction {
         val units = dropSupersededUnits(listUnits(derivedRoot))
         val usersByPool = units.groupBy { it.poolDir(derivedRoot) }
         sweepMacheTrees(derivedRoot, units)
+        sweepTreePool(derivedRoot, units)
         for (variant in Variants.ALL) {
             val variantDir = derivedRoot.resolve(variant.id)
             if (!Files.isDirectory(variantDir)) continue
@@ -209,6 +221,48 @@ object CacheEviction {
     }
 
     /**
+     * The shared tree directory ([SourcePools.treeDir]) keeps what any fork build on disk lists and
+     * goes whole with the last of them. A build with no key list yet could be using anything, so
+     * then nothing is provably dead and every entry stays - the same rule as a pool.
+     */
+    private fun sweepTreePool(derivedRoot: Path, units: List<DerivedUnit>) {
+        val root = derivedRoot.resolve(SourcePools.TREE_POOL)
+        if (!Files.isDirectory(root)) return
+        val forkUnits = units.filter { it.variant != Variants.VANILLA }
+        if (forkUnits.isEmpty()) {
+            deleteRecursively(root)
+            return
+        }
+        for (versionDir in subdirectories(root)) {
+            if (versionDir.fileName.toString() != SourcePools.TREE_POOL_VERSION) deleteRecursively(versionDir)
+        }
+        val keep = HashSet<String>()
+        for (unit in forkUnits) keep += SourcePools.readKeys(unit.dir) ?: return
+        deleteTreeEntries(root.resolve(SourcePools.TREE_POOL_VERSION)) { it !in keep }
+    }
+
+    private fun deleteTreeEntries(dir: Path, shouldDelete: (key: String) -> Boolean) {
+        if (!Files.isDirectory(dir)) return
+        Files.newDirectoryStream(dir).use { entries ->
+            for (entry in entries) {
+                val name = entry.fileName.toString()
+                val key = when {
+                    name.endsWith(ForkSourceTree.ENTRY_SUFFIX) -> name.removeSuffix(ForkSourceTree.ENTRY_SUFFIX)
+                    name.endsWith(".java") -> name.removeSuffix(".java")
+                    // An in-flight write's temp file, not an entry.
+                    else -> continue
+                }
+                if (!shouldDelete(key)) continue
+                try {
+                    Files.deleteIfExists(entry)
+                } catch (e: IOException) {
+                    // Windows refuses to delete a file a reader has open; it goes next sweep.
+                }
+            }
+        }
+    }
+
+    /**
      * Deletes the entire derived-cache directory for [versionId] (remapped jar, index, and
      * search index) regardless of TTL or warm status. Leaves raw downloaded blobs untouched -
      * those are content-addressed and shared, rarely what "clear the cache" means.
@@ -235,11 +289,19 @@ object CacheEviction {
             deleteRecursively(pool.parent.parent)
             return
         }
-        for (key in keys.flatMap { it!! }) {
+        val listed = keys.flatMapTo(HashSet()) { it!! }
+        for (key in listed) {
             Files.deleteIfExists(pool.resolve("$key.java"))
             Files.deleteIfExists(pool.resolve("$key.tokens.json"))
-            Files.deleteIfExists(pool.resolve("$key${ForkSourceTree.ENTRY_SUFFIX}"))
         }
+
+        // Tree entries are shared across forks, and another build's manifest points at them: only
+        // what no other build lists goes. The cleared build rebuilds its tree from the rest.
+        if (variant == Variants.VANILLA) return
+        val others = listUnits(cacheRoot.resolve("derived")).filter { it.variant != Variants.VANILLA }
+        val stillListed = HashSet<String>()
+        for (unit in others) stillListed += SourcePools.readKeys(unit.dir) ?: return
+        deleteTreeEntries(SourcePools.treeDir(cacheRoot)) { it in listed && it !in stillListed }
     }
 
     /** [evictVersion] for every version's derived cache. */
@@ -289,8 +351,9 @@ object CacheEviction {
             val name = top.fileName.toString()
             val variant = Variants.byId(name)
             when {
-                // Mache trees are shared inputs to fork builds, not units; see sweepMacheTrees.
-                name == MacheTreeBuilder.MACHE_DIR -> continue
+                // Shared by fork builds rather than units of their own; see sweepMacheTrees and
+                // sweepTreePool.
+                name == MacheTreeBuilder.MACHE_DIR || name == SourcePools.TREE_POOL -> continue
 
                 variant == null ->
                     addUnitsIn(top, name, Variants.VANILLA, SourcePools.poolKey(Variants.VANILLA, name))
@@ -338,18 +401,27 @@ object CacheEviction {
         for (configDir in subdirectories(sourceCacheRoot)) {
             if (configDir.fileName.toString() != SOURCE_CACHE_CONFIG_VERSION) deleteRecursively(configDir)
         }
+        val entriesDir = sourceCacheRoot.resolve(SOURCE_CACHE_CONFIG_VERSION)
+        if (!Files.isDirectory(entriesDir)) return
+
+        // Source-tree entries from before trees were shared ([SourcePools.treeDir]) sit here with
+        // their keys still listed; nothing reads them from a fork pool any more.
+        val legacyTreeKeys = Files.newDirectoryStream(entriesDir, "*${ForkSourceTree.ENTRY_SUFFIX}").use { found ->
+            found.map { it.fileName.toString().removeSuffix(ForkSourceTree.ENTRY_SUFFIX) }
+        }
+        for (key in legacyTreeKeys) {
+            Files.deleteIfExists(entriesDir.resolve("$key${ForkSourceTree.ENTRY_SUFFIX}"))
+            Files.deleteIfExists(entriesDir.resolve("$key.java"))
+        }
 
         val keep = HashSet<String>()
         for (unit in users) keep += SourcePools.readKeys(unit.dir) ?: return
 
-        val entriesDir = sourceCacheRoot.resolve(SOURCE_CACHE_CONFIG_VERSION)
-        if (!Files.isDirectory(entriesDir)) return
         Files.newDirectoryStream(entriesDir).use { entries ->
             for (entry in entries) {
                 val name = entry.fileName.toString()
                 val key = when {
                     name.endsWith(".tokens.json") -> name.removeSuffix(".tokens.json")
-                    name.endsWith(ForkSourceTree.ENTRY_SUFFIX) -> name.removeSuffix(ForkSourceTree.ENTRY_SUFFIX)
                     name.endsWith(".java") -> name.removeSuffix(".java")
                     // Anything else is not an entry - an in-flight write's temp file above all.
                     else -> continue

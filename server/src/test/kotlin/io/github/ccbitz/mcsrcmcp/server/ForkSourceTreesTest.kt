@@ -46,6 +46,7 @@ class ForkSourceTreesTest {
             label = "paper/test",
             unitDir = unit,
             poolDir = pool,
+            treeDir = dir.resolve("trees"),
             classes = emptyMap(),
             index = IndexData.empty(),
             bundle = DevBundle("26.3.build.1", "https://repo.example/bundle.zip"),

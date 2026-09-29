@@ -41,6 +41,21 @@ object SourcePools {
         cacheRoot.resolve("derived").resolve(variant).resolve(poolKey(variant, mcVersion))
             .resolve("source-cache").resolve(SOURCE_CACHE_CONFIG_VERSION)
 
+    /** Where every fork's source-tree entries live ([ForkSourceTree]); see [treeDir]. */
+    const val TREE_POOL = "source-trees"
+
+    // Bump if what a tree entry holds changes shape; the sweep drops other versions' directories.
+    const val TREE_POOL_VERSION = "v1"
+
+    /**
+     * One directory for every fork and Minecraft version, unlike decompiles: a tree entry is keyed by
+     * its own content, so two builds share one only when they'd hold byte-identical files - Purpur's
+     * classes it didn't patch are Paper's, and a class no one touched carries over to the next
+     * version. Nothing about the fork it came from is in the entry; resolving it against a fork's
+     * bytecode happens per workspace, at read time.
+     */
+    fun treeDir(cacheRoot: Path): Path = cacheRoot.resolve("derived").resolve(TREE_POOL).resolve(TREE_POOL_VERSION)
+
     /**
      * Records every key [classes] can hit in [unitDir], unless it is already there - a derived
      * unit's classes never change once saved, so neither does the list. Units from before pools

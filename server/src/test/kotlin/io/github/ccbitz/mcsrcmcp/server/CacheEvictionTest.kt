@@ -135,38 +135,66 @@ class CacheEvictionTest {
         Files.writeString(pool.resolve("$key.tokens.json"), "[]")
     }
 
-    // A fork build's source-tree entries live in the same pool as its decompiles and are listed the
-    // same way; an entry no build lists goes like any other.
+    private fun writeTreeEntry(dir: Path, key: String) {
+        Files.createDirectories(dir)
+        Files.writeString(dir.resolve("$key.java"), "class X {}")
+        Files.writeString(dir.resolve("$key${ForkSourceTree.ENTRY_SUFFIX}"), "{}")
+    }
+
+    // Every fork's builds share one tree directory: an entry any of them lists stays, whichever fork
+    // it came from, and one none lists goes.
     @Test
-    fun `source tree entries are swept with the pool`(@TempDir cacheRoot: Path) {
-        val unit = makeDerivedDir(cacheRoot, "paper/26.3.build.49", "v2-aaaa-bbbb", Instant.now())
-        writeKeys(unit, "a".repeat(40))
-        val pool = SourcePools.dir(cacheRoot, Variants.PAPER, "26.3")
-        for (key in listOf("a", "b")) {
-            Files.createDirectories(pool)
-            Files.writeString(pool.resolve("${key.repeat(40)}.java"), "class X {}")
-            Files.writeString(pool.resolve("${key.repeat(40)}${ForkSourceTree.ENTRY_SUFFIX}"), "{}")
-        }
+    fun `shared tree entries are kept while any fork build lists them`(@TempDir cacheRoot: Path) {
+        writeKeys(makeDerivedDir(cacheRoot, "paper/26.3.build.49", "v2-aaaa-bbbb", Instant.now()), "a".repeat(40))
+        writeKeys(makeDerivedDir(cacheRoot, "purpur/26.3.build.3", "v2-cccc-dddd", Instant.now()), "b".repeat(40))
+        val trees = SourcePools.treeDir(cacheRoot)
+        for (key in listOf("a", "b", "c")) writeTreeEntry(trees, key.repeat(40))
 
         CacheEviction.sweepSourcePools(cacheRoot)
 
-        assertTrue(Files.exists(pool.resolve("a".repeat(40) + ForkSourceTree.ENTRY_SUFFIX)))
-        assertFalse(Files.exists(pool.resolve("b".repeat(40) + ForkSourceTree.ENTRY_SUFFIX)))
-        assertFalse(Files.exists(pool.resolve("b".repeat(40) + ".java")))
+        assertTrue(Files.exists(trees.resolve("a".repeat(40) + ForkSourceTree.ENTRY_SUFFIX)))
+        assertTrue(Files.exists(trees.resolve("b".repeat(40) + ".java")))
+        assertFalse(Files.exists(trees.resolve("c".repeat(40) + ForkSourceTree.ENTRY_SUFFIX)))
+        assertFalse(Files.exists(trees.resolve("c".repeat(40) + ".java")))
     }
 
     @Test
-    fun `clearing a fork build drops its source tree entries too`(@TempDir cacheRoot: Path) {
-        val unit = makeDerivedDir(cacheRoot, "paper/26.3.build.49", "v2-aaaa-bbbb", Instant.now())
-        writeKeys(unit, "a".repeat(40))
-        val pool = SourcePools.dir(cacheRoot, Variants.PAPER, "26.3")
-        Files.createDirectories(pool)
-        Files.writeString(pool.resolve("a".repeat(40) + ".java"), "class X {}")
-        Files.writeString(pool.resolve("a".repeat(40) + ForkSourceTree.ENTRY_SUFFIX), "{}")
+    fun `the shared tree directory goes with the last fork build`(@TempDir cacheRoot: Path) {
+        makeDerivedDir(cacheRoot, "26.3", "2-aaaa-none", Instant.now())
+        writeTreeEntry(SourcePools.treeDir(cacheRoot), "a".repeat(40))
+
+        CacheEviction.sweepSourcePools(cacheRoot)
+
+        assertFalse(Files.exists(SourcePools.treeDir(cacheRoot)))
+    }
+
+    // Clearing one build must not break another fork's tree: an entry some other build still lists
+    // stays, and the cleared build rebuilds its manifest from the shared entries anyway.
+    @Test
+    fun `clearing a fork build drops only the tree entries no other build lists`(@TempDir cacheRoot: Path) {
+        writeKeys(makeDerivedDir(cacheRoot, "paper/26.3.build.49", "v2-aaaa-bbbb", Instant.now()), "a".repeat(40), "b".repeat(40))
+        writeKeys(makeDerivedDir(cacheRoot, "purpur/26.3.build.3", "v2-cccc-dddd", Instant.now()), "b".repeat(40))
+        val trees = SourcePools.treeDir(cacheRoot)
+        for (key in listOf("a", "b")) writeTreeEntry(trees, key.repeat(40))
 
         CacheEviction.evictWorkspace(cacheRoot, Variants.PAPER, "paper/26.3.build.49", "26.3")
 
+        assertFalse(Files.exists(trees.resolve("a".repeat(40) + ForkSourceTree.ENTRY_SUFFIX)))
+        assertTrue(Files.exists(trees.resolve("b".repeat(40) + ForkSourceTree.ENTRY_SUFFIX)))
+    }
+
+    // Trees built before they were shared left their entries in the fork's own pool; nothing reads
+    // them there any more.
+    @Test
+    fun `tree entries left in a fork's own pool are swept`(@TempDir cacheRoot: Path) {
+        writeKeys(makeDerivedDir(cacheRoot, "paper/26.3.build.49", "v2-aaaa-bbbb", Instant.now()), "a".repeat(40))
+        val pool = SourcePools.dir(cacheRoot, Variants.PAPER, "26.3")
+        writeTreeEntry(pool, "a".repeat(40))
+
+        CacheEviction.sweepSourcePools(cacheRoot)
+
         assertFalse(Files.exists(pool.resolve("a".repeat(40) + ForkSourceTree.ENTRY_SUFFIX)))
+        assertFalse(Files.exists(pool.resolve("a".repeat(40) + ".java")))
     }
 
     // A Minecraft version's mache tree serves every fork's builds of it; it goes with the last one.

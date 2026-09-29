@@ -23,10 +23,10 @@ data class TreeEntry(val carried: List<SourceToken>, val uncoveredLines: List<In
  * applied and its new files added - what paperweight userdev's `applyDevBundlePatches` produces, so the
  * text Paper's developers read, comments and all.
  *
- * Every class goes into the fork's source pool (the same content-keyed directory its decompiles use)
- * as `<key>.java` + `<key>.tree.json`, keyed by what it holds, so a build whose patches mostly didn't
- * change since the last one writes almost nothing. A build unit records which key each of its classes
- * uses in [MANIFEST_FILE].
+ * Every class goes into the shared tree directory ([SourcePools.treeDir]) as `<key>.java` +
+ * `<key>.tree.json`, keyed by what it holds, so a build whose patches mostly didn't change since the
+ * last one - or another fork carrying the same patches - writes almost nothing. A build unit records
+ * which key each of its classes uses in [MANIFEST_FILE], and lists the keys for eviction.
  */
 object ForkSourceTree {
 
@@ -130,7 +130,8 @@ object ForkSourceTree {
     }
 
     // Bump to have every unit rebuild its tree - a newly supported mache, a fix to how trees are made.
-    private const val MANIFEST_HEADER = "#source-tree v1"
+    // v2: entries moved from each fork's pool to the shared tree directory.
+    private const val MANIFEST_HEADER = "#source-tree v2"
 
     private fun sha1Hex(text: String): String =
         HexFormat.of().formatHex(MessageDigest.getInstance("SHA-1").digest(text.toByteArray(Charsets.UTF_8)))

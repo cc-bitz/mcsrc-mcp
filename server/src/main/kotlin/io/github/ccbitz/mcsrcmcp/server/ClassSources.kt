@@ -47,7 +47,7 @@ class DecompiledSources(private val classes: Map<String, ByteArray>, private val
 class TreeSources(
     private val classes: Map<String, ByteArray>,
     private val index: IndexData,
-    private val poolDir: Path,
+    private val treeDir: Path,
     private val fallback: ClassSources,
 ) : ClassSources {
 
@@ -80,7 +80,7 @@ class TreeSources(
 
     override fun source(internalName: String): String {
         val key = keyFor(internalName) ?: return fallback.source(internalName)
-        return readText(poolDir.resolve("$key.java")) ?: fallback.source(internalName)
+        return readText(treeDir.resolve("$key.java")) ?: fallback.source(internalName)
     }
 
     override fun withTokens(internalName: String): DecompiledClass {
@@ -88,8 +88,8 @@ class TreeSources(
         val key = keyFor(internalName) ?: return fallback.withTokens(internalName)
         synchronized(recent) { recent[key] }?.let { return it }
 
-        val text = readText(poolDir.resolve("$key.java")) ?: return fallback.withTokens(internalName)
-        val entryJson = readText(poolDir.resolve("$key${ForkSourceTree.ENTRY_SUFFIX}")) ?: return fallback.withTokens(internalName)
+        val text = readText(treeDir.resolve("$key.java")) ?: return fallback.withTokens(internalName)
+        val entryJson = readText(treeDir.resolve("$key${ForkSourceTree.ENTRY_SUFFIX}")) ?: return fallback.withTokens(internalName)
         val entry = Json.decodeFromString<TreeEntry>(entryJson)
 
         val (carried, stale) = BytecodeTokens.verifyCarried(entry.carried, index, text)

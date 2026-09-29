@@ -52,7 +52,10 @@ class DevBundleWorkspaceBuilder(
             blobStore.pathIfPresent(serverArtifact.sha1) ?: blobStore.put(fetcher.fetch(serverArtifact.url), serverArtifact.sha1)
         }
         fun sourcesFor(unitDir: Path?, classes: Map<String, ByteArray>, index: IndexData, bundleZip: ByteArray?): ClassSources =
-            sourceTrees?.sourcesFor(request.workspaceId, unitDir, sourceCacheDir, classes, index, bundle, version.id, serverJar, bundleZip)
+            sourceTrees?.sourcesFor(
+                request.workspaceId, unitDir, sourceCacheDir, cacheRoot?.let { SourcePools.treeDir(it) },
+                classes, index, bundle, version.id, serverJar, bundleZip,
+            )
                 ?: DecompiledSources(classes, sourceCacheDir)
 
         // The server jar's hash pins the Minecraft version and the zip URL pins the build (a
