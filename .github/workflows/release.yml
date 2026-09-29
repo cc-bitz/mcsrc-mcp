@@ -37,3 +37,5 @@ jobs:
           files: |
             dist/mcsrc-mcp.jar
             dist/mcsrc-mcp.bat
+            scripts/run-server.ps1
+            scripts/autostart.ps1

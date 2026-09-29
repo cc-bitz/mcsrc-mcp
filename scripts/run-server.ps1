@@ -3,9 +3,10 @@
 Keeps the mcsrc-mcp server running. This is what the logon task from autostart.ps1 executes.
 
 .DESCRIPTION
-Runs the server from a copy of the dist/ build, not dist/ itself: the JVM holds its jar open, and
-Windows won't let `gradlew :server:dist` replace an open file. The copy is refreshed every time the
-server starts, so `autostart.ps1 restart` is how a new build goes live.
+Runs the server from a copy of the build, not the build itself: the JVM holds its jar open, and
+Windows won't let `gradlew :server:dist` replace an open file. The build is the mcsrc-mcp.jar next to
+this script, as in a release download, or else the checkout's dist/. The copy is refreshed every time
+the server starts, so `autostart.ps1 restart` is how a new build goes live.
 
 When the server exits, for any reason, it's started again. When something else already holds the
 port (a copy started by hand), this waits instead, since starting a second would only fail to bind.
@@ -18,7 +19,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$dist = Join-Path (Split-Path $PSScriptRoot -Parent) 'dist'
+$checkout = Split-Path $PSScriptRoot -Parent
 $runDir = Join-Path $env:LOCALAPPDATA 'mcsrc-mcp\run'
 $log = Join-Path $runDir 'server.log'
 
@@ -34,10 +35,12 @@ while ($true) {
     }
 
     if (Test-Path $log) { Move-Item $log "$log.old" -Force }
+    # Looked up on every start, so a jar dropped in later is picked up too.
+    $dist = if (Test-Path (Join-Path $PSScriptRoot 'mcsrc-mcp.jar')) { $PSScriptRoot } else { Join-Path $checkout 'dist' }
     if (Test-Path (Join-Path $dist 'mcsrc-mcp.jar')) {
         Copy-Item (Join-Path $dist 'mcsrc-mcp.jar'), (Join-Path $dist 'mcsrc-mcp.bat') $runDir -Force
     } elseif (-not (Test-Path (Join-Path $runDir 'mcsrc-mcp.jar'))) {
-        Set-Content $log "mcsrc-mcp: no build to run - run ``gradlew :server:dist`` in $(Split-Path $dist -Parent)"
+        Set-Content $log "mcsrc-mcp: no build to run - run ``gradlew :server:dist`` in $checkout"
         Start-Sleep -Seconds 60
         continue
     }

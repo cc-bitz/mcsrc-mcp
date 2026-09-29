@@ -77,5 +77,5 @@ jobs:
         # and release.yml only listens for v* anyway.
         run: |
           gh api -X PATCH "repos/${GH_REPO}/git/refs/tags/nightly-build" -f sha="${GITHUB_SHA}" -F force=true
-          gh release upload nightly-build dist/mcsrc-mcp.jar dist/mcsrc-mcp.bat --clobber
+          gh release upload nightly-build dist/mcsrc-mcp.jar dist/mcsrc-mcp.bat scripts/run-server.ps1 scripts/autostart.ps1 --clobber
           gh release edit nightly-build --prerelease --notes "Built from ${GITHUB_SHA} on $(date -u +%Y-%m-%d)."
