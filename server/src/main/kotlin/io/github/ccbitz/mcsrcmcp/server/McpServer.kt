@@ -817,12 +817,9 @@ private fun Server.registerTools(
             val workspaceId = request.workspaceId
 
             versionPreparer.clear(workspaceId)
-            CacheEviction.evictVersion(cacheRoot, workspaceId)
-            // The shared decompile pool lives outside every workspace's directory, so the eviction
-            // above leaves it - clear it too, or the version would still answer from it. That
-            // costs the pool's other workspaces (the rest of a vanilla release train, the fork's
-            // other builds) a re-decompile, never a wrong answer.
-            CacheEviction.evictVersion(cacheRoot, "${request.variant}/${SourcePools.poolKey(request.variant, version.id)}")
+            // Takes the workspace's entries in the shared decompile pool with it, or the version
+            // would still answer from them.
+            CacheEviction.evictWorkspace(cacheRoot, request.variant, workspaceId, version.id)
             if (request.variant == Variants.VANILLA) {
                 // Reports and game data only ever exist for vanilla workspaces - they are generated
                 // from the client jar, which a variant workspace doesn't hold.

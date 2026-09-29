@@ -9,35 +9,26 @@ import java.nio.file.Path
 
 class SourcePoolsTest {
 
+    // Release to snapshot (92% reusable) and release to release (65%) are where the reuse is, and
+    // fresh decompiles of every at-risk class across both showed no drift - so vanilla is one pool.
     @Test
-    fun `a release train groups a release with the versions leading up to it`() {
-        assertEquals("26.3", SourcePools.releaseTrain("26.3"))
-        assertEquals("26.3", SourcePools.releaseTrain("26.3-pre-2"))
-        assertEquals("26.3", SourcePools.releaseTrain("26.3-rc-3"))
-        assertEquals("26.4", SourcePools.releaseTrain("26.4-snapshot-1"))
-        assertEquals("1.21.4", SourcePools.releaseTrain("1.21.4-pre1"))
-        assertEquals("1.21.4", SourcePools.releaseTrain("1.21.4"))
-    }
-
-    // Ids that name no release get a train of their own - the per-version cache they always had.
-    @Test
-    fun `legacy snapshots and old alphas are their own train`() {
-        assertEquals("24w33a", SourcePools.releaseTrain("24w33a"))
-        assertEquals("b1.7.3", SourcePools.releaseTrain("b1.7.3"))
-        assertEquals("rd-132211", SourcePools.releaseTrain("rd-132211"))
+    fun `every vanilla version shares one pool`() {
+        val versions = listOf("26.3", "26.3-pre-2", "26.3-rc-3", "26.4-snapshot-1", "26.2", "1.21.4", "24w33a", "b1.7.3")
+        assertEquals(1, versions.map { SourcePools.poolKey(Variants.VANILLA, it) }.toSet().size)
     }
 
     @Test
-    fun `vanilla pools by train, forks by exact Minecraft version`(@TempDir cacheRoot: Path) {
+    fun `vanilla pools together, forks by exact Minecraft version`(@TempDir cacheRoot: Path) {
         val derived = cacheRoot.resolve("derived")
         assertEquals(
-            derived.resolve("vanilla").resolve("26.3").resolve("source-cache").resolve(SOURCE_CACHE_CONFIG_VERSION),
+            derived.resolve("vanilla").resolve(SourcePools.VANILLA_POOL).resolve("source-cache").resolve(SOURCE_CACHE_CONFIG_VERSION),
             SourcePools.dir(cacheRoot, Variants.VANILLA, "26.3-rc-3"),
         )
         assertEquals(
             derived.resolve("paper").resolve("26.3").resolve("source-cache").resolve(SOURCE_CACHE_CONFIG_VERSION),
             SourcePools.dir(cacheRoot, Variants.PAPER, "26.3"),
         )
+        assertNotEquals(SourcePools.dir(cacheRoot, Variants.PAPER, "26.3"), SourcePools.dir(cacheRoot, Variants.PAPER, "26.2"))
     }
 
     @Test

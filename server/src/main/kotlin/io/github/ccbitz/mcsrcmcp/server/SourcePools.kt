@@ -12,30 +12,30 @@ import java.nio.file.StandardCopyOption
  * directory, and cache eviction sweeps it down to the keys some workspace still on disk lists in
  * its [KEYS_FILE].
  *
- * Pools are deliberately narrower than "everything with this variant". The key covers a class and
- * its inner classes, but Vineflower also reads the rest of the jar - supertype signatures, the
- * same-package names its import collision check looks at - so an unchanged class can decompile
- * slightly differently once enough around it changed. Scoping a pool to one fork's builds of one
- * Minecraft version, or to one vanilla release train (26.3's pre-releases, release candidates and
- * the release itself all share 99%+ of their classes byte for byte), keeps nearly all the reuse
- * while bounding that drift to neighbours that are almost identical anyway.
+ * All of vanilla shares one pool. The key covers a class and its inner classes but not the rest of
+ * the jar Vineflower reads while decompiling it (supertype signatures, the same-package names its
+ * import collision check looks at), so in principle an unchanged class could decompile differently
+ * once enough around it changed - which is why pools were first scoped to one release train. It
+ * didn't survive measurement: every class whose own bytes were identical but whose dependencies'
+ * API changed (7,338 of them, over 26.3-pre-2 -> rc-2, 26.3 -> 26.4-snapshot-1 and 26.2 -> 26.3),
+ * decompiled fresh against each version's own jar, came out identical, while a control run over
+ * classes that did change caught 185 of 200. Pooling across trains is what reuses the 92% a release
+ * shares with the next snapshot and the 65% it shares with the next release.
+ *
+ * A fork's pool stays per Minecraft version: its builds of one version are near-identical, and that
+ * measurement covered vanilla only.
  */
 object SourcePools {
 
     /** One line per cache key the workspace's classes produce, written beside its index.bin. */
     const val KEYS_FILE = "source-keys.txt"
 
-    // "26.3", "26.3-pre-2", "26.3-rc-3", "26.4-snapshot-1", "1.21.4-pre1" -> the release they lead
-    // up to. Legacy weekly snapshots ("24w33a") and alpha/beta ids name no release, so each is its
-    // own train - exactly the per-version cache they had before pools existed.
-    private val RELEASE_TRAIN = Regex("""(\d+(?:\.\d+)+)(?:-.+)?""")
-
-    fun releaseTrain(versionId: String): String =
-        RELEASE_TRAIN.matchEntire(versionId)?.groupValues?.get(1) ?: versionId
+    /** Vanilla's one pool. Not a Minecraft version id, so it can't collide with a fork's pool key. */
+    const val VANILLA_POOL = "all"
 
     /** The pool a workspace of [variant] on Minecraft [mcVersion] shares. */
     fun poolKey(variant: String, mcVersion: String): String =
-        if (variant == Variants.VANILLA) releaseTrain(mcVersion) else mcVersion
+        if (variant == Variants.VANILLA) VANILLA_POOL else mcVersion
 
     fun dir(cacheRoot: Path, variant: String, mcVersion: String): Path =
         cacheRoot.resolve("derived").resolve(variant).resolve(poolKey(variant, mcVersion))

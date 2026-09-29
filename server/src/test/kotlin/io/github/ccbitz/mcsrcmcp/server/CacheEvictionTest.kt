@@ -174,16 +174,66 @@ class CacheEvictionTest {
     }
 
     @Test
-    fun `a vanilla pool goes with the last version of its train`(@TempDir cacheRoot: Path) {
+    fun `the vanilla pool lives while any vanilla version does, and goes with the last`(@TempDir cacheRoot: Path) {
         val now = Instant.now()
-        makeDerivedDir(cacheRoot, "26.2", "2-aaaa-none", now)
-        writeEntry(SourcePools.dir(cacheRoot, Variants.VANILLA, "26.3"), "a".repeat(40))
-        writeEntry(SourcePools.dir(cacheRoot, Variants.VANILLA, "26.2"), "b".repeat(40))
+        val old = makeDerivedDir(cacheRoot, "26.2", "2-aaaa-none", now.minus(Duration.ofDays(60)))
+        makeDerivedDir(cacheRoot, "26.3", "2-bbbb-none", now)
+        val pool = SourcePools.dir(cacheRoot, Variants.VANILLA, "26.3")
+        writeEntry(pool, "b".repeat(40))
+
+        CacheEviction.evictStale(cacheRoot, Duration.ofDays(30), now)
+        assertFalse(Files.exists(old))
+        assertTrue(Files.exists(pool.resolve("b".repeat(40) + ".java")))
+
+        CacheEviction.evictStale(cacheRoot, Duration.ofDays(30), now.plus(Duration.ofDays(60)))
+        assertFalse(Files.exists(cacheRoot.resolve("derived").resolve("vanilla")))
+    }
+
+    // clear_cache on one version must start that version over - every entry it could hit goes,
+    // shared or not - without costing every other vanilla version the whole pool.
+    @Test
+    fun `clearing a workspace drops the pool entries it lists and leaves the rest`(@TempDir cacheRoot: Path) {
+        val now = Instant.now()
+        val cleared = makeDerivedDir(cacheRoot, "26.3", "2-bbbb-none", now)
+        val other = makeDerivedDir(cacheRoot, "26.2", "2-aaaa-none", now)
+        writeKeys(cleared, "a".repeat(40), "b".repeat(40))
+        writeKeys(other, "b".repeat(40), "c".repeat(40))
+        val pool = SourcePools.dir(cacheRoot, Variants.VANILLA, "26.3")
+        for (key in listOf("a", "b", "c")) writeEntry(pool, key.repeat(40))
+
+        CacheEviction.evictWorkspace(cacheRoot, Variants.VANILLA, "26.3", "26.3")
+
+        assertFalse(Files.exists(cleared))
+        assertTrue(Files.exists(other))
+        assertFalse(Files.exists(pool.resolve("a".repeat(40) + ".java")))
+        assertFalse(Files.exists(pool.resolve("b".repeat(40) + ".tokens.json")), "shared, but the cleared version could hit it")
+        assertTrue(Files.exists(pool.resolve("c".repeat(40) + ".java")))
+    }
+
+    @Test
+    fun `clearing a workspace with no key list drops its whole pool`(@TempDir cacheRoot: Path) {
+        makeDerivedDir(cacheRoot, "26.3", "2-bbbb-none", Instant.now())
+        val pool = SourcePools.dir(cacheRoot, Variants.VANILLA, "26.3")
+        writeEntry(pool, "a".repeat(40))
+
+        CacheEviction.evictWorkspace(cacheRoot, Variants.VANILLA, "26.3", "26.3")
+
+        assertFalse(Files.exists(pool))
+    }
+
+    // Pools from when vanilla was pooled per release train map onto no unit any more.
+    @Test
+    fun `per-train vanilla pools left from the old layout are removed`(@TempDir cacheRoot: Path) {
+        val now = Instant.now()
+        makeDerivedDir(cacheRoot, "26.3", "2-bbbb-none", now)
+        val legacy = cacheRoot.resolve("derived").resolve("vanilla").resolve("26.3")
+        writeEntry(legacy.resolve("source-cache").resolve(SOURCE_CACHE_CONFIG_VERSION), "a".repeat(40))
+        writeEntry(SourcePools.dir(cacheRoot, Variants.VANILLA, "26.3"), "b".repeat(40))
 
         CacheEviction.evictStale(cacheRoot, Duration.ofDays(30), now)
 
-        assertFalse(Files.exists(cacheRoot.resolve("derived").resolve("vanilla").resolve("26.3")))
-        assertTrue(Files.exists(cacheRoot.resolve("derived").resolve("vanilla").resolve("26.2")))
+        assertFalse(Files.exists(legacy))
+        assertTrue(Files.exists(SourcePools.dir(cacheRoot, Variants.VANILLA, "26.3").resolve("b".repeat(40) + ".java")))
     }
 
     @Test

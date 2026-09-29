@@ -173,9 +173,12 @@ class McpServerTest {
         assertFalse(AGENT_GUIDE.contains("mcasset.cloud"))
     }
 
+    // Never the default cache root: buildServer starts cache eviction on whatever root it gets, and
+    // on the real one that ran against the user's own cache - then was killed mid-delete when the
+    // test JVM exited, leaving half a pool behind.
     @Test
-    fun `buildServer constructs without throwing`() {
-        val server = buildServer()
+    fun `buildServer constructs without throwing`(@org.junit.jupiter.api.io.TempDir cacheRoot: java.nio.file.Path) {
+        val server = buildServer(cacheRoot)
         assertNotNull(server)
     }
 }

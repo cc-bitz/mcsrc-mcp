@@ -110,7 +110,7 @@ object CacheEviction {
         // Sizing is the one step that has to read every file - there is no recorded size to trust
         // instead - so it is the only full walk eviction does. Pools count against the budget
         // too: they hold every decompiled class, and leaving them out would let the cache overrun
-        // it by a pool per release train.
+        // it by a pool's worth - every vanilla class ever decompiled.
         val units = listUnits(derivedRoot)
         val usersByPool = units.groupBy { it.poolDir(derivedRoot) }
         val poolSizes = usersByPool.keys.associateWithTo(HashMap()) { directorySize(it) }
@@ -183,6 +183,30 @@ object CacheEviction {
      */
     fun evictVersion(cacheRoot: Path, versionId: String) {
         deleteRecursively(cacheRoot.resolve("derived").resolve(versionId))
+    }
+
+    /**
+     * [evictVersion] for a workspace, plus every pool entry it could hit - what clear_cache means:
+     * this workspace decompiles from scratch next time. Shared entries go too, since the workspace
+     * could be answering from one, but the rest of the pool stays; with vanilla in a single pool,
+     * dropping all of it would make every other version pay for one version's clear. A workspace
+     * with no key list could be using anything, so then its whole pool goes.
+     */
+    fun evictWorkspace(cacheRoot: Path, variant: String, workspaceId: String, mcVersion: String) {
+        val workspaceDir = cacheRoot.resolve("derived").resolve(workspaceId)
+        val unitDirs = if (Files.isDirectory(workspaceDir)) subdirectories(workspaceDir) else emptyList()
+        val keys = unitDirs.map { SourcePools.readKeys(it) }
+        deleteRecursively(workspaceDir)
+
+        val pool = SourcePools.dir(cacheRoot, variant, mcVersion)
+        if (keys.any { it == null }) {
+            deleteRecursively(pool.parent.parent)
+            return
+        }
+        for (key in keys.flatMap { it!! }) {
+            Files.deleteIfExists(pool.resolve("$key.java"))
+            Files.deleteIfExists(pool.resolve("$key.tokens.json"))
+        }
     }
 
     /** [evictVersion] for every version's derived cache. */
