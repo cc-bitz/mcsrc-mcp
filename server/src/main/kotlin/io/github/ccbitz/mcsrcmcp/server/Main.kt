@@ -1,28 +1,25 @@
 package io.github.ccbitz.mcsrcmcp.server
 
 import io.github.oshai.kotlinlogging.KotlinLoggingConfiguration
-import io.modelcontextprotocol.kotlin.sdk.server.StdioServerTransport
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.runBlocking
-import kotlinx.io.asSink
-import kotlinx.io.asSource
-import kotlinx.io.buffered
+import io.ktor.server.application.ServerReady
+import io.ktor.server.cio.CIO
+import io.ktor.server.engine.embeddedServer
 
-fun main() = runBlocking {
-    // Stdio MCP transport owns stdout. Keep kotlin-logging's own startup diagnostic off stdout,
-    // and route the slf4j-simple backend (which kotlin-logging delegates to) to stderr.
+fun main() {
+    // stdout carries nothing now, but diagnostics stay on stderr so a launcher's redirect of one
+    // stream still captures all of them.
     KotlinLoggingConfiguration.logStartupMessage = false
     System.setProperty("org.slf4j.simpleLogger.logFile", "System.err")
     System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "warn")
 
+    val host = resolveHost()
+    val port = resolvePort()
     val server = buildServer()
-    val transport = StdioServerTransport(
-        input = System.`in`.asSource().buffered(),
-        output = System.out.asSink().buffered(),
-    )
 
-    val session = server.createSession(transport)
-    val done = Job()
-    session.onClose { done.complete() }
-    done.join()
+    embeddedServer(CIO, host = host, port = port) {
+        // Announced once bound rather than before start(), so a port already in use can't print
+        // an address nothing is listening on.
+        monitor.subscribe(ServerReady) { System.err.println("mcsrc-mcp: listening on ws://$host:$port$MCP_PATH") }
+        mcpWebSocketModule(server)
+    }.start(wait = true)
 }

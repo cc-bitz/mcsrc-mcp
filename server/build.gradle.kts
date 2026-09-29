@@ -12,10 +12,12 @@ dependencies {
     implementation(project(":core"))
     implementation(project(":cache"))
     implementation("io.modelcontextprotocol:kotlin-sdk-server:0.15.0")
+    // The MCP endpoint is a WebSocket. Pinned to the Ktor the SDK is built against.
+    implementation("io.ktor:ktor-server-cio:3.5.1")
+    implementation("io.ktor:ktor-server-websockets:3.5.1")
     implementation("io.github.oshai:kotlin-logging:8.0.4")
     implementation("org.slf4j:slf4j-simple:2.0.18")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-io-core:0.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("org.vineflower:vineflower:1.12.0")
     // Paper variant: paperclip's binary patches are bsdiff; jbsdiff is the exact library
@@ -26,6 +28,7 @@ dependencies {
     testImplementation(platform("org.junit:junit-bom:5.11.0"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    testImplementation("io.ktor:ktor-server-test-host:3.5.1")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

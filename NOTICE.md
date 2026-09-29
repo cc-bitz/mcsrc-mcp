@@ -43,10 +43,11 @@ Direct and transitive dependencies used by this project:
 |---|---|---|
 | [ASM](https://asm.ow2.io/) | BSD-3-Clause | `core` — bytecode reading/writing |
 | [Fabric `mapping-io` / `mapping-io-extras`](https://github.com/FabricMC/mapping-io) | Apache-2.0 | `core` — ProGuard mapping parsing/remapping |
-| [Kotlin MCP SDK](https://github.com/modelcontextprotocol/kotlin-sdk) (`kotlin-sdk-server`) | MIT | `server` — MCP protocol/stdio transport |
+| [Kotlin MCP SDK](https://github.com/modelcontextprotocol/kotlin-sdk) (`kotlin-sdk-server`) | MIT | `server` — MCP protocol/WebSocket transport |
+| [Ktor](https://github.com/ktor/ktor) (`ktor-server-cio`, `ktor-server-websockets`) | Apache-2.0 | `server` — WebSocket server |
 | [kotlinx.serialization](https://github.com/Kotlin/kotlinx.serialization) | Apache-2.0 | `cache`, `server` — JSON parsing |
 | [kotlinx.coroutines](https://github.com/Kotlin/kotlinx.coroutines) | Apache-2.0 | `server` |
-| [kotlinx-io](https://github.com/Kotlin/kotlinx-io) | Apache-2.0 | `server` — stdio transport |
+| [kotlinx-io](https://github.com/Kotlin/kotlinx-io) | Apache-2.0 | `server` — via the MCP SDK |
 | [Vineflower](https://github.com/Vineflower/vineflower) | Apache-2.0 | `server` — decompiler behind `get_class_source` |
 | [JUnit 5](https://junit.org/junit5/) | EPL-2.0 | test-only, all modules |
 

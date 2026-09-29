@@ -1,8 +1,8 @@
 @echo off
 setlocal
 
-rem stdout is the MCP protocol channel, so every diagnostic in this script is sent to stderr
-rem (>&2). Anything echoed to stdout would be read by the client as a malformed message.
+rem Diagnostics go to stderr (>&2), where the server writes its own, so redirecting that one
+rem stream captures everything.
 
 set "JAVA_EXE=java.exe"
 if defined JAVA_HOME set "JAVA_EXE=%JAVA_HOME%\bin\java.exe"
