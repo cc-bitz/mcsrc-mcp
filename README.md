@@ -31,6 +31,16 @@ It listens on `ws://127.0.0.1:25590/mcp`. Set `MCSRC_MCP_PORT` to change the por
 files wherever it's told, so don't expose it beyond loopback. Handshakes from browser pages on
 other sites are refused.
 
+On Windows, `scripts/autostart.ps1` starts it hidden at every logon and restarts it if it exits.
+It runs a copy of the `dist/` build, so rebuilding never hits a locked jar:
+
+```powershell
+./gradlew :server:dist
+powershell -ExecutionPolicy Bypass -File scripts/autostart.ps1 install -AcceptEula   # -JavaHome <jdk>, -Port <n>
+powershell -ExecutionPolicy Bypass -File scripts/autostart.ps1 restart               # after a rebuild
+powershell -ExecutionPolicy Bypass -File scripts/autostart.ps1 uninstall
+```
+
 Then point the client at it. For Claude Code:
 
 ```json
