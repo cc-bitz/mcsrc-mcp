@@ -43,7 +43,7 @@ powershell -ExecutionPolicy Bypass -File scripts/autostart.ps1 restart          
 powershell -ExecutionPolicy Bypass -File scripts/autostart.ps1 uninstall
 ```
 
-Then point the client at it. For Claude Code:
+Then point the client at it, over whichever transport it supports. For Claude Code, WebSocket:
 
 ```json
 {
@@ -53,9 +53,18 @@ Then point the client at it. For Claude Code:
 }
 ```
 
-or, for a client without WebSocket support, `{ "type": "http", "url": "http://127.0.0.1:25590/mcp" }`.
-An HTTP session left idle for a day is closed; the client's next request gets a 404 and it
-initializes again.
+or Streamable HTTP, which most other MCP clients speak:
+
+```json
+{
+  "mcpServers": {
+    "mcsrc-mcp": { "type": "http", "url": "http://127.0.0.1:25590/mcp" }
+  }
+}
+```
+
+Both reach the same server, so they behave identically. An HTTP session left idle for a day is
+closed; the client's next request gets a 404 and it initializes again.
 
 ## Paper, Folia and Purpur
 
