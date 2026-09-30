@@ -19,7 +19,9 @@ fun main() {
     embeddedServer(CIO, host = host, port = port) {
         // Announced once bound rather than before start(), so a port already in use can't print
         // an address nothing is listening on.
-        monitor.subscribe(ServerReady) { System.err.println("mcsrc-mcp: listening on ws://$host:$port$MCP_PATH") }
-        mcpWebSocketModule(server)
+        monitor.subscribe(ServerReady) {
+            System.err.println("mcsrc-mcp: listening on ws://$host:$port$MCP_PATH and http://$host:$port$MCP_PATH")
+        }
+        mcpModule(server)
     }.start(wait = true)
 }

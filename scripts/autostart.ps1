@@ -56,7 +56,7 @@ switch ($Action) {
         Register-ScheduledTask -TaskName $TaskName -Action $taskAction -Trigger $trigger -Settings $settings `
             -Description 'Keeps the mcsrc-mcp MCP server running (scripts/autostart.ps1).' -Force | Out-Null
         Start-ScheduledTask -TaskName $TaskName
-        "Installed. mcsrc-mcp will listen on ws://127.0.0.1:$Port/mcp - log: $env:LOCALAPPDATA\mcsrc-mcp\run\server.log"
+        "Installed. mcsrc-mcp will listen on ws://127.0.0.1:$Port/mcp and http://127.0.0.1:$Port/mcp - log: $env:LOCALAPPDATA\mcsrc-mcp\run\server.log"
     }
 
     'restart' {

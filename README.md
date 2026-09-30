@@ -16,8 +16,9 @@ Requires JDK 21 or newer.
 
 ## Run
 
-The server speaks MCP over WebSocket, so it runs on its own and every client connects to the same
-process — one JVM and one set of warm, decompiled versions, however many agents are using it.
+The server speaks MCP over WebSocket and Streamable HTTP, so it runs on its own and every client
+connects to the same process — one JVM and one set of warm, decompiled versions, however many
+agents are using it.
 
 ```bash
 MCSRC_MCP_ACCEPT_EULA=1 server/build/install/server/bin/server   # server.bat on Windows
@@ -26,9 +27,10 @@ MCSRC_MCP_ACCEPT_EULA=1 server/build/install/server/bin/server   # server.bat on
 Accepting the Minecraft EULA is required before any tool that touches Minecraft content will run,
 and has to be set in the server's environment, not the client's.
 
-It listens on `ws://127.0.0.1:25590/mcp`. Set `MCSRC_MCP_PORT` to change the port, and
+It listens on `ws://127.0.0.1:25590/mcp` and `http://127.0.0.1:25590/mcp` — one port and path
+for both, so use whichever your client speaks. Set `MCSRC_MCP_PORT` to change the port, and
 `MCSRC_MCP_HOST` to bind another interface — but there is no authentication, and `extract` writes
-files wherever it's told, so don't expose it beyond loopback. Handshakes from browser pages on
+files wherever it's told, so don't expose it beyond loopback. Requests from browser pages on
 other sites are refused.
 
 On Windows, `scripts/autostart.ps1` starts it hidden at every logon and restarts it if it exits.
@@ -50,6 +52,10 @@ Then point the client at it. For Claude Code:
   }
 }
 ```
+
+or, for a client without WebSocket support, `{ "type": "http", "url": "http://127.0.0.1:25590/mcp" }`.
+An HTTP session left idle for a day is closed; the client's next request gets a 404 and it
+initializes again.
 
 ## Paper, Folia and Purpur
 
