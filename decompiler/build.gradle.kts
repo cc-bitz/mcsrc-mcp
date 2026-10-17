@@ -17,7 +17,7 @@ dependencies {
     compileOnly("org.vineflower:vineflower:1.12.0")
 
     testImplementation("org.vineflower:vineflower:1.12.0")
-    testImplementation(platform("org.junit:junit-bom:5.11.0"))
+    testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
