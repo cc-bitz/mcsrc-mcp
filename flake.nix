@@ -21,9 +21,16 @@
       });
 
       # So `nix flake check` builds the package, which is what catches a stale nix/deps.json.
-      checks = forAllSystems (pkgs: {
-        inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) mcsrc-mcp;
-      });
+      checks = forAllSystems (
+        pkgs:
+        {
+          inherit (self.packages.${pkgs.stdenv.hostPlatform.system}) mcsrc-mcp;
+        }
+        # A NixOS VM, so Linux only.
+        // nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          nixos-module = pkgs.testers.runNixOSTest (import ./nix/test.nix self);
+        }
+      );
 
       overlays.default = final: _prev: {
         mcsrc-mcp = final.callPackage ./nix/package.nix { };
