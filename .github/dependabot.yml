@@ -12,6 +12,10 @@ updates:
           - "*"
     commit-message:
       prefix: "chore"
+    # Holds back releases younger than a week: a compromised release is usually caught and pulled
+    # within days, so this keeps one from reaching auto-merge. Security updates are not delayed.
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: nix
     directory: /
@@ -19,6 +23,8 @@ updates:
       interval: monthly
     commit-message:
       prefix: "chore"
+    cooldown:
+      default-days: 7
 
   - package-ecosystem: github-actions
     directory: /
@@ -30,3 +36,5 @@ updates:
           - "*"
     commit-message:
       prefix: "chore"
+    cooldown:
+      default-days: 7
