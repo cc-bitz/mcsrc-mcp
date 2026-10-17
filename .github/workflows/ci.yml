@@ -53,6 +53,20 @@ jobs:
           path: dist/
           retention-days: 1
 
+  nix:
+    name: Nix flake check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Nix
+        uses: DeterminateSystems/determinate-nix-action@e847f25223456b3058e12f7fc9d777b6a6f25060 # v3.23.2
+
+      # Builds the package, so a dependency change that nix/deps.json doesn't cover fails here.
+      - name: Check flake
+        run: nix flake check -L
+
   nightly:
     name: Publish nightly build
     needs: build

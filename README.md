@@ -43,6 +43,34 @@ powershell -ExecutionPolicy Bypass -File scripts/autostart.ps1 restart          
 powershell -ExecutionPolicy Bypass -File scripts/autostart.ps1 uninstall
 ```
 
+On NixOS, the flake's module runs it as a systemd service:
+
+```nix
+{
+  inputs.mcsrc-mcp.url = "github:cc-bitz/mcsrc-mcp";
+
+  outputs = { nixpkgs, mcsrc-mcp, ... }: {
+    nixosConfigurations.<host> = nixpkgs.lib.nixosSystem {
+      modules = [
+        mcsrc-mcp.nixosModules.default
+        {
+          services.mcsrc-mcp = {
+            enable = true;
+            acceptEula = true;
+            # user = "<you>";  # so `extract` can write into your home; otherwise a sandboxed dynamic user
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+`port`, `host`, `cacheDir` (default `/var/cache/mcsrc-mcp`), `idleMinutes`, `javaOpts` and `environment` are
+there too. `nix run github:cc-bitz/mcsrc-mcp` runs it once without installing. After changing
+dependencies, regenerate the lock the Nix build uses with
+`nix build .#mcsrc-mcp.mitmCache.updateScript && ./result`.
+
 Then point the client at it, over whichever transport it supports. For Claude Code, WebSocket:
 
 ```json

@@ -7,3 +7,5 @@ logs/
 *.class
 .idea/
 .mcp.json
+result
+result-*
