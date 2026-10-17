@@ -8,7 +8,6 @@ import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
-import io.ktor.client.request.prepareGet
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
@@ -17,6 +16,8 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.serialization.kotlinx.json.json
+import io.ktor.server.cio.CIO
+import io.ktor.server.engine.embeddedServer
 import io.ktor.server.application.Application
 import io.ktor.server.application.install
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
@@ -36,6 +37,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -47,6 +49,8 @@ import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
+import java.net.URI
+import java.net.http.HttpRequest
 import java.nio.file.Path
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -205,16 +209,48 @@ class McpEndpointTest {
 
     // A client listening for notifications makes no requests while it waits for one.
     @Test
-    fun `a session with an open stream is not idle`(@TempDir cacheRoot: Path) = serve(cacheRoot, module = quickExpiry) { server ->
-        val id = client.initializeOverHttp()
-        client.prepareGet(MCP_PATH) {
-            session(id)
-            header(HttpHeaders.Accept, "text/event-stream")
-        }.execute { stream ->
-            assertEquals(HttpStatusCode.OK, stream.status)
-            assertEquals(ContentType.Text.EventStream, stream.contentType()?.withoutParameters())
-            delay(500)
-            assertEquals(1, server.sessions.size)
+    //
+    // Against a real CIO server, not testApplication: since Ktor 3.6 (KTOR-8705) the test engine
+    // hands a client a streamed response only once it completes, and this one never does.
+    fun `a session with an open stream is not idle`(@TempDir cacheRoot: Path) = runBlocking {
+        val scope = CoroutineScope(SupervisorJob())
+        val server = buildServer(cacheRoot, OfflineFetcher, scope = scope)
+        val app = embeddedServer(CIO, host = "127.0.0.1", port = 0) { quickExpiry(server) }.start()
+        val http = java.net.http.HttpClient.newHttpClient()
+        try {
+            val url = URI("http://127.0.0.1:${app.engine.resolvedConnectors().first().port}$MCP_PATH")
+            fun post(body: String, session: String? = null) = http.send(
+                HttpRequest.newBuilder(url)
+                    .header(HttpHeaders.ContentType, "application/json")
+                    .header(HttpHeaders.Accept, "application/json, text/event-stream")
+                    .apply { if (session != null) header(MCP_SESSION_ID_HEADER, session) }
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .build(),
+                java.net.http.HttpResponse.BodyHandlers.ofString(),
+            )
+            val id = post(rpc(1, "initialize", INITIALIZE_PARAMS)).headers().firstValue(MCP_SESSION_ID_HEADER).get()
+            assertEquals(202, post("""{"jsonrpc":"2.0","method":"notifications/initialized"}""", id).statusCode())
+
+            // ofInputStream returns once the headers are in, leaving the body streaming.
+            val stream = http.send(
+                HttpRequest.newBuilder(url)
+                    .header(HttpHeaders.Accept, "text/event-stream")
+                    .header(MCP_SESSION_ID_HEADER, id)
+                    .header("MCP-Protocol-Version", "2025-06-18")
+                    .GET()
+                    .build(),
+                java.net.http.HttpResponse.BodyHandlers.ofInputStream(),
+            )
+            stream.body().use {
+                assertEquals(200, stream.statusCode())
+                assertEquals("text/event-stream", stream.headers().firstValue(HttpHeaders.ContentType).get().substringBefore(';'))
+                delay(500)
+                assertEquals(1, server.sessions.size)
+            }
+        } finally {
+            http.shutdownNow()
+            app.stop(0, 0)
+            scope.cancel()
         }
     }
 
