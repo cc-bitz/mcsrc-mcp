@@ -10,12 +10,18 @@ defaults:
   run:
     shell: nu {0}
 
+# Every job checks that Dependabot both opened the PR and triggered this run, from a branch in this
+# repository. github.actor alone is whoever caused the event, and has been steered to read
+# dependabot[bot] on a PR an attacker controls - getting Dependabot to update a fork's branch, say.
 jobs:
   # Regenerating runs the whole Gradle build, so the bumped dependencies' code runs here. This job
   # holds no credentials at all - not even the checkout token - and only hands the file on.
   deps:
     name: Regenerate deps.json
-    if: github.actor == 'dependabot[bot]' && !startsWith(github.head_ref, 'dependabot/github_actions/')
+    if: >-
+      github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && !startsWith(github.head_ref, 'dependabot/github_actions/')
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.diff.outputs.changed }}
@@ -63,7 +69,10 @@ jobs:
   push:
     name: Push deps.json
     needs: deps
-    if: needs.deps.outputs.changed == 'true'
+    if: >-
+      needs.deps.outputs.changed == 'true'
+      && github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]'
+      && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
 
     steps:
@@ -101,7 +110,9 @@ jobs:
     # deps and push are skipped for Actions bumps and when deps.json is current, which still get
     # auto-merged; a failure or cancellation in either holds the PR.
     if: >-
-      always() && github.actor == 'dependabot[bot]'
+      always()
+      && github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]'
+      && github.event.pull_request.head.repo.full_name == github.repository
       && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
 
