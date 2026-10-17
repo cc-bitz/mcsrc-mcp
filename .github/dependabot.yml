@@ -1,0 +1,32 @@
+version: 2
+
+updates:
+  - package-ecosystem: gradle
+    directory: /
+    schedule:
+      interval: monthly
+    # One PR, so nix/deps.json is regenerated once rather than once per library.
+    groups:
+      gradle:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "chore"
+
+  - package-ecosystem: nix
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "chore"

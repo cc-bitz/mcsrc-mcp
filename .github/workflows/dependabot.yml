@@ -1,0 +1,97 @@
+name: Dependabot
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: nu {0}
+
+jobs:
+  deps:
+    name: Regenerate deps.json
+    # Pushes are made with the App token, so they come from the App rather than Dependabot and
+    # don't start this workflow again - but, unlike GITHUB_TOKEN pushes, they do start CI.
+    if: github.actor == 'dependabot[bot]' && !startsWith(github.head_ref, 'dependabot/github_actions/')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: token
+        with:
+          client-id: ${{ secrets.BOT_CLIENT_ID }}
+          private-key: ${{ secrets.BOT_PRIVATE_KEY }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ steps.token.outputs.token }}
+
+      - uses: hustcer/setup-nu@95cd3bfe252450ef7d35dd9a7ddecf3484341134 # v3.28
+        with:
+          version: "0.116"
+
+      - uses: DeterminateSystems/determinate-nix-action@e847f25223456b3058e12f7fc9d777b6a6f25060 # v3.23.2
+
+      # A Gradle bump changes the jars the Nix build needs; a nixpkgs bump can change Gradle's own.
+      - name: Regenerate deps.json
+        run: |
+          let update = nix build .#mcsrc-mcp.mitmCache.updateScript --no-link --print-out-paths | str trim
+          ^$update
+
+      - name: Commit and push changes
+        run: |
+          if (git diff --quiet nix/deps.json | complete).exit_code == 0 {
+            print "deps.json is already current"
+            return
+          }
+          git --no-pager diff --stat nix/deps.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore: regenerate nix/deps.json"
+          git push
+
+  automerge:
+    name: Auto-merge
+    needs: deps
+    # deps is skipped for Actions bumps, which still get auto-merged.
+    if: always() && github.actor == 'dependabot[bot]' && needs.deps.result != 'failure'
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        id: metadata
+
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: token
+        with:
+          client-id: ${{ secrets.BOT_CLIENT_ID }}
+          private-key: ${{ secrets.BOT_PRIVATE_KEY }}
+
+      - uses: hustcer/setup-nu@95cd3bfe252450ef7d35dd9a7ddecf3484341134 # v3.28
+        with:
+          version: "0.116"
+
+      # Majors wait for review, and so do Kotlin, Ktor and the MCP SDK: the server pins Ktor to the
+      # one the SDK is built against, and the tests don't drive the transports end to end, so a
+      # mismatch there can pass CI and still break clients.
+      #
+      # The merge goes through the App token so the push to main starts the nightly build.
+      - name: Enable auto-merge
+        env:
+          DEPENDENCIES: ${{ steps.metadata.outputs.updated-dependencies-json }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          let held = $env.DEPENDENCIES | from json | where {|dep|
+            $dep.updateType == "version-update:semver-major" or $dep.dependencyName =~ '^(org\.jetbrains\.kotlin|io\.ktor|io\.modelcontextprotocol)'
+          }
+          if ($held | is-not-empty) {
+            print "Needs review:"
+            print ($held | select dependencyName prevVersion newVersion updateType)
+            return
+          }
+          gh pr merge --auto --squash $env.PR_URL
