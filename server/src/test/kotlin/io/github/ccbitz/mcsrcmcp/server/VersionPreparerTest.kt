@@ -178,6 +178,23 @@ class VersionPreparerTest {
         assertEquals(3, builder.buildCount, "clearAll should make prepare() do real work again")
     }
 
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `releaseWarm waits out a running index build, then drops warm workspaces but keeps the index`() = runTest {
+        val cache = WorkspaceCache()
+        val preparer = VersionPreparer(cache, buildersOf(CacheDirBuilder(Files.createTempDirectory("mcsrc-index-test"))), this)
+        preparer.prepare(version, detail)
+
+        assertFalse(preparer.releaseWarm(), "the index build hasn't run yet")
+        assertNotNull(cache.get("1.99-test"))
+
+        advanceUntilIdle()
+
+        assertTrue(preparer.releaseWarm())
+        assertNull(cache.get("1.99-test"))
+        assertNotNull(preparer.searchIndex("1.99-test"))
+    }
+
     @Test
     fun `pollUntilReady gives up after the timeout and returns the last known state`() = runTest {
         val result = pollUntilReady(

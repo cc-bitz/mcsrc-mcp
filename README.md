@@ -82,3 +82,10 @@ source. Older versions — obfuscated mache, or no mache — keep serving decomp
 Downloaded and derived files are cached under `%LOCALAPPDATA%\mcsrc-mcp\cache` (Windows),
 `~/Library/Caches/mcsrc-mcp` (macOS), or `$XDG_CACHE_HOME/mcsrc-mcp` (Linux, falls back to
 `~/.cache/mcsrc-mcp`). Set `MCSRC_MCP_CACHE_DIR` to use a different location.
+
+## Memory
+
+Versions you've used stay loaded so repeat calls are fast, but after 30 minutes without a tool
+call the server drops them and stops the game processes some tools start, falling back to an
+empty JVM; the next call reloads from the cache above in seconds. Set `MCSRC_MCP_IDLE_MINUTES`
+to change the wait, or to `0` to keep everything loaded.

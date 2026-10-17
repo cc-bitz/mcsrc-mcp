@@ -150,6 +150,18 @@ class VersionPreparer(
         inFlight.remove(workspaceId)
     }
 
+    /**
+     * Drops every warm workspace from memory, leaving the on-disk caches alone, so the next use
+     * reloads from disk rather than rebuilding. Search indexes are file handles, not content, so
+     * they stay. Refuses (false) while a prepare or an index build is running: those hold their
+     * workspace anyway, and would only end up loaded twice.
+     */
+    fun releaseWarm(): Boolean {
+        if (inFlight.isNotEmpty() || indexJobs.values.any { it.isActive }) return false
+        cache.clear()
+        return true
+    }
+
     /** [clear] for every workspace this preparer has touched. */
     fun clearAll() {
         val workspaceIds = cache.warmVersions() + indexJobs.keys + indexProgress.keys + indexes.keys + inFlight.keys

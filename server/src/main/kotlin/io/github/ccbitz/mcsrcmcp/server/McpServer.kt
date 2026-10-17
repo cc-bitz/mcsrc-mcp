@@ -6,6 +6,7 @@ import io.github.ccbitz.mcsrcmcp.cache.CacheRoot
 import io.github.ccbitz.mcsrcmcp.cache.UnknownVersionException
 import io.github.ccbitz.mcsrcmcp.cache.VersionResolver
 import io.modelcontextprotocol.kotlin.sdk.server.ClientConnection
+import io.modelcontextprotocol.kotlin.sdk.server.RegisteredTool
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolRequest
@@ -576,6 +577,27 @@ fun buildServer(
     )
 
     server.registerTools(metadata, eulaGate, resolver, versionPreparer, reportGenerator, gameBridge, cacheRoot, blobStore)
+
+    // After a stretch with no tool calls, warm workspaces leave the heap and the bridge JVMs exit,
+    // so a server left running between sessions shrinks back to an empty JVM. Everything reloads
+    // from the disk cache on the next call: seconds, not a rebuild.
+    resolveIdleTimeout()?.let { timeout ->
+        val idle = IdleTracker()
+        val tracked = server.tools.values.map { registered ->
+            RegisteredTool(registered.tool) { request -> idle.track { registered.handler(this, request) } }
+        }
+        server.removeTools(tracked.map { it.tool.name })
+        server.addTools(tracked)
+        scope.launch {
+            releaseWhenIdle(idle, timeout) {
+                if (!versionPreparer.releaseWarm()) return@releaseWhenIdle false
+                gameBridge.clearAll()
+                compactMemory()
+                System.err.println("mcsrc-mcp: idle for ${timeout.toMinutes()} min, released warm versions")
+                true
+            }
+        }
+    }
     return server
 }
 
