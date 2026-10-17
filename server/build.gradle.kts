@@ -13,25 +13,25 @@ dependencies {
     implementation(project(":cache"))
     implementation("io.modelcontextprotocol:kotlin-sdk-server:0.15.0")
     // The MCP endpoint is a WebSocket and a Streamable HTTP endpoint on one port. Pinned to the Ktor the SDK is built against.
-    implementation("io.ktor:ktor-server-cio:3.5.1")
-    implementation("io.ktor:ktor-server-websockets:3.5.1")
-    implementation("io.ktor:ktor-server-sse:3.5.1")
-    implementation("io.ktor:ktor-server-content-negotiation:3.5.1")
-    implementation("io.ktor:ktor-serialization-kotlinx-json:3.5.1")
+    implementation("io.ktor:ktor-server-cio:3.6.0")
+    implementation("io.ktor:ktor-server-websockets:3.6.0")
+    implementation("io.ktor:ktor-server-sse:3.6.0")
+    implementation("io.ktor:ktor-server-content-negotiation:3.6.0")
+    implementation("io.ktor:ktor-serialization-kotlinx-json:3.6.0")
     implementation("io.github.oshai:kotlin-logging:8.0.4")
-    implementation("org.slf4j:slf4j-simple:2.0.18")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    implementation("org.slf4j:slf4j-simple:2.0.20")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
     implementation("org.vineflower:vineflower:1.12.0")
     // Paper variant: paperclip's binary patches are bsdiff; jbsdiff is the exact library
     // paperclip itself applies them with, commons-compress is its bzip2 backend.
     implementation("io.sigpipe:jbsdiff:1.0")
-    implementation("org.apache.commons:commons-compress:1.27.1")
+    implementation("org.apache.commons:commons-compress:1.28.0")
 
-    testImplementation(platform("org.junit:junit-bom:5.11.0"))
+    testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
-    testImplementation("io.ktor:ktor-server-test-host:3.5.1")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
+    testImplementation("io.ktor:ktor-server-test-host:3.6.0")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

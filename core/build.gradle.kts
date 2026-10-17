@@ -9,13 +9,13 @@ java {
 }
 
 dependencies {
-    api("org.ow2.asm:asm:9.9.1")
-    api("org.ow2.asm:asm-commons:9.9.1")
-    api("org.ow2.asm:asm-util:9.9.1")
-    api("net.fabricmc:mapping-io:0.8.0")
-    api("net.fabricmc:mapping-io-extras:0.8.0")
+    api("org.ow2.asm:asm:9.11")
+    api("org.ow2.asm:asm-commons:9.11")
+    api("org.ow2.asm:asm-util:9.11")
+    api("net.fabricmc:mapping-io:0.9.1")
+    api("net.fabricmc:mapping-io-extras:0.9.1")
 
-    testImplementation(platform("org.junit:junit-bom:5.11.0"))
+    testImplementation(platform("org.junit:junit-bom:6.1.3"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
