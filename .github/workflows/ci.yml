@@ -4,13 +4,24 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Started by the Dependabot workflow on a bump whose nix/deps.json needed no regenerating.
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# Both check jobs skip Dependabot's own commit on a Gradle or Nix bump: deps.json may still be
+# regenerated on top of it, and the Dependabot workflow starts CI once that's settled - through the
+# regenerated commit's push, or a dispatch when nothing changed. The condition mirrors that
+# workflow's gate, so whenever it won't run, CI does. (Job conditions can't read env, hence twice.)
 jobs:
   build:
     name: Build and test
+    if: >-
+      !(github.event_name == 'pull_request'
+      && github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && (startsWith(github.head_ref, 'dependabot/gradle/') || startsWith(github.head_ref, 'dependabot/nix/')))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -55,6 +66,11 @@ jobs:
 
   nix:
     name: Nix flake check
+    if: >-
+      !(github.event_name == 'pull_request'
+      && github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && (startsWith(github.head_ref, 'dependabot/gradle/') || startsWith(github.head_ref, 'dependabot/nix/')))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

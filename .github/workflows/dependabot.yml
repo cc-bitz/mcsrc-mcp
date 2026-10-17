@@ -104,11 +104,57 @@ jobs:
           git commit -am "chore: regenerate nix/deps.json"
           git push
 
+  # CI skipped Dependabot's commit, and with deps.json already current nothing gets pushed to start
+  # it, so it's started here - and waited for. Those skipped jobs count as passing for the ruleset, so
+  # auto-merge must not be enabled until this run has passed on the PR's exact commit.
+  ci:
+    name: Start CI
+    needs: deps
+    if: >-
+      needs.deps.outputs.changed == 'false'
+      && github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    # A dispatch is the one event a GITHUB_TOKEN can start a workflow with.
+    permissions:
+      actions: write
+
+    steps:
+      - uses: hustcer/setup-nu@95cd3bfe252450ef7d35dd9a7ddecf3484341134 # v3.28
+        with:
+          version: "0.116"
+
+      - name: Run CI and wait for it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: ${{ github.head_ref }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # A minute's slack on the runner's clock against GitHub's.
+          let since = (date now) - 1min
+          gh workflow run ci.yml --ref $env.BRANCH
+          mut run: any = null
+          for _ in 1..30 {
+            sleep 5sec
+            let runs = (
+              gh run list --workflow ci.yml --event workflow_dispatch --branch $env.BRANCH --json databaseId,headSha,createdAt
+              | from json
+              | where headSha == $env.SHA and ($it.createdAt | into datetime) > $since
+            )
+            if ($runs | is-not-empty) {
+              $run = $runs | first | get databaseId
+              break
+            }
+          }
+          if $run == null { error make {msg: $"no CI run started for ($env.SHA)"} }
+          gh run watch $run --exit-status --interval 30
+
   automerge:
     name: Auto-merge
-    needs: [deps, push]
-    # deps and push are skipped for Actions bumps and when deps.json is current, which still get
-    # auto-merged; a failure or cancellation in either holds the PR.
+    needs: [deps, push, ci]
+    # deps, push and ci are skipped for Actions bumps, and push or ci depending on whether deps.json
+    # changed; a failure or cancellation in any holds the PR.
     if: >-
       always()
       && github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]'
