@@ -176,10 +176,9 @@ jobs:
         with:
           version: "0.116"
 
-      # Majors wait for review, and so do Kotlin, Ktor and the MCP SDK: the server pins Ktor to the
-      # one the SDK is built against, and the tests don't drive the transports end to end, so a
-      # mismatch there can pass CI and still break clients. Dependabot names the Kotlin plugins
-      # by their kotlin("...") shorthand, hence jvm and plugin.serialization.
+      # Majors wait for review: they break on purpose, in ways CI may not cover. Everything else
+      # merges once CI passes - including Ktor and the MCP SDK, whose transports the flake check
+      # exercises end to end on the real service.
       #
       # The merge goes through the App token so the push to main starts the nightly build.
       - name: Enable auto-merge
@@ -189,7 +188,7 @@ jobs:
           GH_TOKEN: ${{ steps.token.outputs.token }}
         run: |
           let held = $env.DEPENDENCIES | from json | where {|dep|
-            $dep.updateType == "version-update:semver-major" or $dep.dependencyName =~ '^(org\.jetbrains\.kotlin|io\.ktor|io\.modelcontextprotocol)|^(jvm|plugin\.serialization)$'
+            $dep.updateType == "version-update:semver-major"
           }
           if ($held | is-not-empty) {
             print "Needs review:"
