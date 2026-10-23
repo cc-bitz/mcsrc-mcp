@@ -321,6 +321,41 @@ class SearchIndexTest {
         assertTrue(Files.exists(tempDir.resolve("search-index-v2.toc")), "expected search index toc to be persisted")
     }
 
+    @Test
+    fun `SearchIndexBuilder writes sources in class order however their reads finish`() = runTest {
+        // A slow head and staggered reads, so completions arrive out of order behind it.
+        val names = (0 until 40).map { "net/minecraft/C%02d".format(it) }
+        val sources = object : ClassSources {
+
+            override fun source(internalName: String): String {
+                Thread.sleep(if (internalName == names.first()) 200L else (names.size - names.indexOf(internalName)).toLong())
+                return "class ${internalName.substringAfterLast('/')} // marker\n"
+            }
+
+            override fun withTokens(internalName: String): DecompiledClass = throw UnsupportedOperationException()
+
+        }
+        val workspace = VersionWorkspace(
+            versionId = "1.99-test",
+            indexData = IndexData.empty(),
+            remapper = null,
+            remappedClasses = names.reversed().associateWith { ByteArray(0) },
+            referenceIndexer = io.github.ccbitz.mcsrcmcp.core.Indexer(),
+            assets = emptyMap(),
+            assetSource = mapAssetSource(),
+            cacheDir = tempDir,
+            sources = sources,
+        )
+
+        val progress = mutableListOf<Int>()
+        val index = SearchIndexBuilder(workspace, tempDir).build { progress.add(it) }
+
+        val matches = index.search("marker", useRegex = false, limit = 100, includeSource = true, includeAssets = false).matches
+        assertEquals(names.map { it.replace('/', '.') }, matches.map { it.path })
+        assertEquals(progress.sorted(), progress)
+        assertEquals(100, progress.last())
+    }
+
     private fun loadClassBytes(internalName: String): ByteArray {
         val stream = javaClass.classLoader.getResourceAsStream("$internalName.class")
             ?: error("fixture class not found on test classpath: $internalName")

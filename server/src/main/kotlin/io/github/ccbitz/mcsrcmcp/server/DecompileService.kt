@@ -28,8 +28,22 @@ class DecompileTimeoutException(className: String) :
 class DecompileFailedException(className: String, cause: Throwable) :
     RuntimeException("decompilation of $className failed: ${cause.message}", cause)
 
+// What Vineflower writes in place of what it gave up on: a method (or a class, while processing),
+// and a whole class while rendering it to text. The second also comes as "$ VF: ..." when there was
+// no text at all, hence no leading $.
+private val DECOMPILE_FAILURE_MARKERS = listOf("\$VF: Couldn't be decompiled", "VF: Unable to decompile class")
+
+/**
+ * Whether [source] has a part Vineflower gave up on. Some of those failures are Vineflower bugs that
+ * recur every time, but some are the JVM running out of heap mid-class - datafixer giants like
+ * BlockStateData under a busy 1.5GB server, for one - and the pools are content-keyed and shared by
+ * every version, so a cached failure would outlive the pressure that caused it until the class itself
+ * changed. Such output is served but never cached, and a cached copy of it counts as a miss.
+ */
+internal fun isFailedDecompile(source: String): Boolean = DECOMPILE_FAILURE_MARKERS.any { it in source }
+
 /** [IContextSource] backed by an in-memory map of internal class name -> class bytes. */
-private class InMemoryContextSource(
+internal class InMemoryContextSource(
     private val sourceName: String,
     private val classes: Map<String, ByteArray>,
 ) : IContextSource {
@@ -196,14 +210,14 @@ object DecompileService {
         // valid against the exact text they came from, so serving a half-populated pair would be
         // worse than paying for the decompile again.
         if (cacheFile != null && tokenFile != null && Files.exists(cacheFile) && Files.exists(tokenFile)) {
-            val tokens = Json.decodeFromString<List<SourceToken>>(Files.readString(tokenFile))
-            return DecompiledClass(Files.readString(cacheFile), tokens)
+            val source = readCached(cacheFile, tokenFile)
+            if (source != null) return DecompiledClass(source, Json.decodeFromString<List<SourceToken>>(Files.readString(tokenFile)))
         }
 
         val collector = TokenCollector(TextTokenVisitor.EMPTY)
         val result = runDecompile(classes, className, timeoutMs, collector)
 
-        if (cacheFile != null && tokenFile != null) {
+        if (cacheFile != null && tokenFile != null && !isFailedDecompile(result.source)) {
             writeAtomic(cacheFile, result.source)
             writeAtomic(tokenFile, Json.encodeToString(result.tokens))
         }
@@ -219,16 +233,27 @@ object DecompileService {
     ): String {
         val cacheFile = cacheDir?.resolve("${sourceCacheKey(classes, className)}.java")
         if (cacheFile != null && Files.exists(cacheFile)) {
-            return Files.readString(cacheFile)
+            readCached(cacheFile)?.let { return it }
         }
 
         val source = runDecompile(classes, className, timeoutMs, collector = null).source
 
-        if (cacheFile != null) {
+        if (cacheFile != null && !isFailedDecompile(source)) {
             writeAtomic(cacheFile, source)
         }
 
         return source
+    }
+
+    // A cached failure is from before failures stopped being cached. It goes, so the next index build
+    // counts the class as a miss and gives it to the bulk decompile rather than reading it as a hit and
+    // retrying in-process on every build. Best effort: a reader holding it open on Windows just means
+    // the next read tries again.
+    private fun readCached(source: Path, vararg siblings: Path): String? {
+        val text = Files.readString(source)
+        if (!isFailedDecompile(text)) return text
+        for (file in listOf(source, *siblings)) runCatching { Files.deleteIfExists(file) }
+        return null
     }
 
     /**
@@ -342,7 +367,7 @@ object DecompileService {
         }
     }
 
-    private fun writeAtomic(target: Path, content: String) {
+    internal fun writeAtomic(target: Path, content: String) {
         Files.createDirectories(target.parent)
         val tmp = Files.createTempFile(target.parent, "src-", ".tmp")
         try {

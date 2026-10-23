@@ -117,3 +117,10 @@ Versions you've used stay loaded so repeat calls are fast, but after 30 minutes 
 call the server drops them and stops the game processes some tools start, falling back to an
 empty JVM; the next call reloads from the cache above in seconds. Set `MCSRC_MCP_IDLE_MINUTES`
 to change the wait, or to `0` to keep everything loaded.
+
+A version's full-text index (what `search_code` reads) is built in the background the first time
+it's used, by decompiling all of it. When the machine has the memory free, that runs in a separate
+JVM that exits once it's done — about 18 seconds and a 2.8GB heap for a current release on 8
+threads, instead of a minute and a half inside the server. Set
+`MCSRC_MCP_DECOMPILE_THREADS` to change its thread count (by default half the CPUs, at most 8;
+its heap is 1.3GB plus 192MB per thread), or to `0` to always decompile inside the server.

@@ -24,7 +24,20 @@ interface ClassSources {
     /** Returns once the sources are what they'll stay - [TreeSources] may still be switching over. */
     suspend fun awaitSettled() {}
 
+    /**
+     * Which of [outerClasses] a [source] call would have to decompile rather than read, so a caller
+     * about to read all of them can decompile those ahead in bulk ([BulkDecompiler]). Null when
+     * there's nothing to decompile, or nowhere to cache it.
+     */
+    fun pendingDecompiles(outerClasses: List<String>): PendingDecompiles? = null
+
 }
+
+/**
+ * Outer classes whose decompiles aren't cached yet: [outerClasses] are the targets, [classes] the
+ * whole jar they decompile against, and [cacheDir] the source pool their output belongs in.
+ */
+class PendingDecompiles(val classes: Map<String, ByteArray>, val cacheDir: Path, val outerClasses: List<String>)
 
 /** Today's sources: Vineflower's decompile of the workspace's classes, cached in its source pool. */
 class DecompiledSources(private val classes: Map<String, ByteArray>, private val cacheDir: Path?) : ClassSources {
@@ -32,6 +45,14 @@ class DecompiledSources(private val classes: Map<String, ByteArray>, private val
     override fun source(internalName: String): String = DecompileService.decompileClass(classes, internalName, cacheDir = cacheDir)
 
     override fun withTokens(internalName: String): DecompiledClass = DecompileService.decompileWithTokens(classes, internalName, cacheDir = cacheDir)
+
+    // Existence only: an old cached failure looks like a hit here, and source() retries and deletes it -
+    // finding the few up front would mean reading every cached file.
+    override fun pendingDecompiles(outerClasses: List<String>): PendingDecompiles? {
+        val dir = cacheDir ?: return null
+        val missing = outerClasses.filter { !Files.exists(dir.resolve("${DecompileService.sourceCacheKey(classes, it)}.java")) }
+        return if (missing.isEmpty()) null else PendingDecompiles(classes, dir, missing)
+    }
 
 }
 
@@ -99,6 +120,10 @@ class TreeSources(
         synchronized(recent) { recent[key] = result }
         return result
     }
+
+    // Only the classes the tree can't answer - a fork's real source never goes near Vineflower.
+    override fun pendingDecompiles(outerClasses: List<String>): PendingDecompiles? =
+        fallback.pendingDecompiles(outerClasses.filter { name -> keyFor(name)?.let { Files.exists(treeDir.resolve("$it.java")) } != true })
 
     private fun keyFor(internalName: String): String? = tree?.get(internalName.substringBefore('$'))
 

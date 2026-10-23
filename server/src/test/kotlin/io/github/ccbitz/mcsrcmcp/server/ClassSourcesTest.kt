@@ -121,4 +121,28 @@ class ClassSourcesTest {
         assertEquals(thing.lines().indexOfFirst { it.contains("private int helper") } + 1, target.declarationLine)
     }
 
+    @Test
+    fun `pending decompiles are the uncached classes the tree can't serve`(@TempDir dir: Path) {
+        val f = fixture(dir)
+
+        val pending = f.sources.pendingDecompiles(listOf("demo/Other", "demo/Thing"))
+        assertEquals(listOf("demo/Other"), pending?.outerClasses)
+        assertEquals(dir.resolve("decompiled"), pending?.cacheDir)
+
+        f.sources.source("demo/Other")
+        assertEquals(null, f.sources.pendingDecompiles(listOf("demo/Other", "demo/Thing")))
+    }
+
+    @Test
+    fun `before the tree is published every class is a pending decompile`(@TempDir dir: Path) {
+        val f = fixture(dir, publish = false)
+
+        assertEquals(listOf("demo/Other", "demo/Thing"), f.sources.pendingDecompiles(listOf("demo/Other", "demo/Thing"))?.outerClasses)
+    }
+
+    @Test
+    fun `decompiles with nowhere to cache them are never pending`() {
+        assertEquals(null, DecompiledSources(mapOf("demo/Other" to ByteArray(0)), cacheDir = null).pendingDecompiles(listOf("demo/Other")))
+    }
+
 }

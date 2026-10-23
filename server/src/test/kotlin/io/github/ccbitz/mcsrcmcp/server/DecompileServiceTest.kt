@@ -64,6 +64,31 @@ class DecompileServiceTest {
     }
 
     @Test
+    fun `a cached failed decompile is treated as a miss and replaced`(@org.junit.jupiter.api.io.TempDir tempDir: Path) {
+        // What an out-of-memory decompile leaves behind; it must not stick in a shared pool forever.
+        val cacheFile = tempDir.resolve(DecompileService.sourceCacheKey(itemAndBlockItem, "net/minecraft/Item") + ".java")
+        Files.writeString(cacheFile, "class Item {\n    // \$VF: Couldn't be decompiled\n    // java.lang.OutOfMemoryError: Java heap space\n}")
+
+        val result = DecompileService.decompileClass(itemAndBlockItem, "net/minecraft/Item", cacheDir = tempDir)
+
+        assertTrue(result.contains("getMaxStackSize"), "expected a real decompile, got:\n$result")
+        assertEquals(result, Files.readString(cacheFile))
+    }
+
+    @Test
+    fun `a cached failed decompile with tokens is treated as a miss too`(@org.junit.jupiter.api.io.TempDir tempDir: Path) {
+        val key = DecompileService.sourceCacheKey(itemAndBlockItem, "net/minecraft/Item")
+        Files.writeString(tempDir.resolve("$key.java"), "/* VF: Unable to decompile class */")
+        Files.writeString(tempDir.resolve("$key.tokens.json"), "[]")
+
+        val result = DecompileService.decompileWithTokens(itemAndBlockItem, "net/minecraft/Item", cacheDir = tempDir)
+
+        assertTrue(result.source.contains("getMaxStackSize"), "expected a real decompile, got:\n${result.source}")
+        assertTrue(result.tokens.isNotEmpty())
+        assertEquals(result.source, Files.readString(tempDir.resolve("$key.java")))
+    }
+
+    @Test
     fun `a second call with the same cacheDir returns the cached content without re-decompiling`(@org.junit.jupiter.api.io.TempDir tempDir: Path) {
         DecompileService.decompileClass(itemAndBlockItem, "net/minecraft/Item", cacheDir = tempDir)
 
