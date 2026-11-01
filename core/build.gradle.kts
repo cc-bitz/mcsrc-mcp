@@ -9,9 +9,9 @@ java {
 }
 
 dependencies {
-    api("org.ow2.asm:asm:9.11")
-    api("org.ow2.asm:asm-commons:9.11")
-    api("org.ow2.asm:asm-util:9.11")
+    api("org.ow2.asm:asm:9.11.1")
+    api("org.ow2.asm:asm-commons:9.11.1")
+    api("org.ow2.asm:asm-util:9.11.1")
     api("net.fabricmc:mapping-io:0.9.1")
     api("net.fabricmc:mapping-io-extras:0.9.1")
 

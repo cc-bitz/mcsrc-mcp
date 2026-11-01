@@ -21,7 +21,7 @@ dependencies {
     implementation("io.github.oshai:kotlin-logging:8.0.4")
     implementation("org.slf4j:slf4j-simple:2.0.20")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.12.0")
     implementation("org.vineflower:vineflower:1.12.0")
     // Paper variant: paperclip's binary patches are bsdiff; jbsdiff is the exact library
     // paperclip itself applies them with, commons-compress is its bzip2 backend.
